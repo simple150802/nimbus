@@ -1,0 +1,2 @@
+- create a queue to store crd created
+- crd_queue:{crd1: crd.data, status}

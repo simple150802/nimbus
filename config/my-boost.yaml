@@ -1,0 +1,25 @@
+apiVersion: lazyken.io.vn/v1alpha1
+kind: StartupCPUBoost
+metadata:
+  name: boost-001
+  namespace: serverless
+selector:
+  matchExpressions:
+  - key: serving.knative.dev/service
+    operator: In
+    values: ["measure-web"]
+spec:
+  resourcePolicy:
+    containerPolicies:
+    - containerName: user-container
+      resourceRange:
+        requests:
+          min: "100m"
+          max: "500m"
+        limits:
+          min: "1"
+          max: "2"
+  durationPolicy:
+    apiCondition:
+      url: "http://measure-web.serverless.svc.cluster.local/custom-ready"
+      response: "OK"

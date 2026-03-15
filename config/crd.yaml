@@ -1,0 +1,72 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: startupcpuboosts.lazyken.io.vn
+spec:
+  # Your custom API group
+  group: lazyken.io.vn
+  scope: Namespaced
+  names:
+    plural: startupcpuboosts
+    singular: startupcpuboost
+    kind: StartupCPUBoost
+    shortNames:
+    - scb
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            # 1. The Selector Block (at the root level based on your image)
+            selector:
+              type: object
+              properties:
+                matchExpressions:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      key: { type: string }
+                      operator: { type: string }
+                      values:
+                        type: array
+                        items: { type: string }
+            # 2. The Spec Block
+            spec:
+              type: object
+              properties:
+                resourcePolicy:
+                  type: object
+                  properties:
+                    containerPolicies:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          containerName:
+                            type: string
+                          # HERE IS YOUR NEW RANGE CONCEPT:
+                          resourceRange:
+                            type: object
+                            properties:
+                              requests:
+                                type: object
+                                properties:
+                                  min: { type: string }
+                                  max: { type: string }
+                              limits:
+                                type: object
+                                properties:
+                                  min: { type: string }
+                                  max: { type: string }
+                durationPolicy:
+                  type: object
+                  properties:
+                    apiCondition:
+                      type: object
+                      properties:
+                        url: { type: string }
+                        response: { type: string }
