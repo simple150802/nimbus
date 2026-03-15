@@ -1,2 +1,2 @@
 # startup-boost-controller
-Controller for managing resource in startup phase haha
+Controller for managing resource in startup phase
