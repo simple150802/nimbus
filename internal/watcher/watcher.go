@@ -20,9 +20,6 @@ type BoostWatcher struct {
 	client dynamic.Interface
 	gvr    schema.GroupVersionResource
 
-	// ==========================================
-	// 🔗 YOUR NEW CUSTOM QUEUE
-	// ==========================================
 	head *BoostEvent // Start of the queue (the next item to be processed)
 	tail *BoostEvent // End of the queue (where brand new items are added)
 
@@ -60,9 +57,6 @@ func (bw *BoostWatcher) Dequeue(target *BoostEvent) *BoostEvent {
 		return nil
 	}
 
-	// ==========================================
-	// CASE A: The target is at the very front (the head)
-	// ==========================================
 	if bw.head.Metadata.Namespace == target.Metadata.Namespace && bw.head.Metadata.Name == target.Metadata.Name {
 		item := bw.head
 		bw.head = bw.head.Next // Move the head to the next person in line
@@ -76,9 +70,6 @@ func (bw *BoostWatcher) Dequeue(target *BoostEvent) *BoostEvent {
 		return item
 	}
 
-	// ==========================================
-	// CASE B: The target is in the middle or at the end
-	// ==========================================
 	current := bw.head
 
 	for current.Next != nil {
@@ -120,7 +111,7 @@ func (bw *BoostWatcher) StartWatcher() {
 	}
 	defer watcher.Stop()
 
-	fmt.Println("👀 Watcher started: Listening for K8s events across ALL namespaces...")
+	fmt.Println("Watcher started: Listening for K8s events across ALL namespaces...")
 
 	for event := range watcher.ResultChan() {
 		obj, ok := event.Object.(*unstructured.Unstructured)
@@ -148,36 +139,37 @@ func (bw *BoostWatcher) StartWatcher() {
 
 // 3. The Consumer
 func (bw *BoostWatcher) RunWorker() {
-	fmt.Println("👷 Worker started: Direct linked-list monitoring with RLock...")
+	fmt.Println("Worker started: Direct linked-list monitoring with RLock...")
 
-	current := bw.head
+	var current *BoostEvent
 
 	for {
-		fmt.Printf("\n🔄 RECONCILIATION: Walking list from head to tail...\n")
+		fmt.Printf("\nRECONCILIATION: Walking list from head to tail...\n")
 
 		bw.mu.RLock()
 		if bw.head == nil {
-			fmt.Println("📭 List is empty, waiting...")
+			fmt.Println("List is empty, waiting...")
+			current = nil
 			bw.mu.RUnlock()
-			time.Sleep(5 * time.Second)
+			time.Sleep(2 * time.Second)
 			continue
 		}
-		fmt.Printf("\n🛠️  STEP PROCESSING: %s/%s\n", current.Metadata.Namespace, current.Metadata.Name)
-		if current.Next != bw.tail {
-			current = current.Next
-		}
-		if current.Next == bw.tail {
+
+		if current == nil {
 			current = bw.head
 		}
+
+		// 3. Now we can safely print data
+		fmt.Printf("STEP PROCESSING: %s/%s\n", current.Metadata.Namespace, current.Metadata.Name)
+
+		// 4. Move to next or loop back
+		if current.Next != nil {
+			current = current.Next
+		} else {
+			current = bw.head
+		}
+
 		bw.mu.RUnlock()
 		time.Sleep(2 * time.Second)
-
 	}
-}
-
-// reconcileBoost handles the actual "work" for a single item
-func (bw *BoostWatcher) reconcileBoost(item *BoostEvent) {
-	// 🚀 Put your HTTP POST logic here.
-	// Even if this takes 3 seconds, the Watcher is NOT blocked!
-	fmt.Printf("      -> [API CALL] Sending heartbeat for %s\n", item.Metadata.Name)
 }
