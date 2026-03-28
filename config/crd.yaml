@@ -1,17 +1,17 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: startupcpuboosts.lazyken.io.vn
+  name: advancestartupcpuboosts.lazyken.io.vn
 spec:
   # Your custom API group
   group: lazyken.io.vn
   scope: Namespaced
   names:
-    plural: startupcpuboosts
-    singular: startupcpuboost
-    kind: StartupCPUBoost
+    plural: advancestartupcpuboosts
+    singular: advancestartupcpuboost
+    kind: AdvanceStartupCPUBoost
     shortNames:
-    - scb
+    - ascb
   versions:
     - name: v1alpha1
       served: true
@@ -52,11 +52,6 @@ spec:
                           resourceRange:
                             type: object
                             properties:
-                              requests:
-                                type: object
-                                properties:
-                                  min: { type: string }
-                                  max: { type: string }
                               limits:
                                 type: object
                                 properties:

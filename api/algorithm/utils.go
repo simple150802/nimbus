@@ -1,0 +1,137 @@
+package algorithm
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"lazyken-controller/api/boostevent"
+	"lazyken-controller/api/kubeapi"
+	"lazyken-controller/api/kubeconfig"
+	"lazyken-controller/api/logging"
+	"net/http"
+	"strings"
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+var (
+	DYNCLIENT = kubeconfig.DYNCLIENT
+	CLIENTSET = kubeconfig.CLIENTSET
+	STD_GVR   = kubeconfig.STD_GVR
+	ADV_GVR   = kubeconfig.ADV_GVR
+)
+
+func getRespt(ctx context.Context, event *boostevent.BoostEvent, cpuValue string) (time.Duration, error) {
+	logging.Stage("Measuring response time on", cpuValue, "CPU")
+	// 2. Build the Label Selector String dynamically from the CRD
+	var selectorParts []string
+	for _, expr := range event.Selector.MatchExpressions {
+		vals := strings.Join(expr.Values, ",")
+
+		part := fmt.Sprintf("%s %s (%s)", expr.Key, strings.ToLower(expr.Operator), vals)
+		selectorParts = append(selectorParts, part)
+	}
+
+	// Join all expressions together with commas (creates a logical AND for the label selector)
+	labelSelector := strings.Join(selectorParts, ",")
+
+	deployments, err := CLIENTSET.AppsV1().Deployments(event.Metadata.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+
+	if err != nil {
+		logging.Failure("Failed to list deployments:", err)
+		return 0, err // Abort on API error
+	}
+
+	// If the array is empty, the app hasn't been applied yet!
+	if len(deployments.Items) == 0 {
+		logging.Warning("Target resource not found! Aborting test for this event.")
+		return 0, err
+	}
+
+	logging.Warning("Waiting for pods to scale down to 0...")
+
+	for {
+		pods, err := CLIENTSET.CoreV1().Pods(event.Metadata.Namespace).List(ctx, metav1.ListOptions{
+			LabelSelector: labelSelector,
+		})
+
+		if err != nil {
+			logging.Failure("Failed to list pods:", err)
+			return 0, err // Exit the function if there's a critical API error
+		}
+
+		// Check if we hit our target state!
+		if len(pods.Items) == 0 {
+			logging.Success("Pods successfully scaled to 0!")
+			break // Break out of the infinite loop
+		}
+
+		// Log the current count so you can see it working in the terminal
+		// logging.Normal("Still waiting... Found", len(pods.Items), "pods running.")
+
+		// Sleep for 2 seconds before asking the API again
+		time.Sleep(2 * time.Second)
+	}
+
+	// Apply CRD here
+	kubeapi.CreateStartupCPUBoost(ctx, event, cpuValue)
+
+	// Guarantee the CRD is deleted when this function finishes!
+	defer kubeapi.DeleteStartupCPUBoost(ctx, event.Metadata.Namespace, event.Metadata.Name)
+
+	responseTime, err := triggerHttp(event.Spec.DurationPolicy.ApiCondition)
+
+	if err != nil {
+		logging.Failure("Failed to measure response time correctly:", err)
+		return 0, err
+	}
+
+	logging.Normal("Final recorded cold start time was:", responseTime)
+	return responseTime, nil
+
+}
+
+func triggerHttp(api_condition boostevent.ApiCondition) (time.Duration, error) {
+	targetURL := api_condition.Url
+	expectedResponse := api_condition.Response
+
+	logging.Normal("Triggering pod... Sending request to:", targetURL)
+
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+	}
+
+	start := time.Now()
+
+	for {
+		resp, err := client.Get(targetURL)
+		if err != nil {
+			// Usually means the Service/Pod isn't reachable yet (Normal during cold start)
+			logging.Normal("Pod not reachable yet, retrying...")
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		bodyBytes, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if err != nil {
+			logging.Warning("Failed to read response body, retrying...")
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		bodyString := string(bodyBytes)
+		duration := time.Since(start)
+
+		// Check if the body contains our expected string
+		if strings.Contains(bodyString, expectedResponse) {
+			logging.Success(fmt.Sprintf("Cold start successful! Expected response received in %v", duration))
+			return duration, nil
+		}
+
+	}
+}

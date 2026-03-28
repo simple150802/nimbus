@@ -1,5 +1,5 @@
-apiVersion: lazyken.io.vn/v1alpha1
-kind: AdvanceStartupCPUBoost
+apiVersion: autoscaling.x-k8s.io/v1alpha1
+kind: StartupCPUBoost
 metadata:
   name: boost-001
   namespace: serverless
@@ -12,10 +12,9 @@ spec:
   resourcePolicy:
     containerPolicies:
     - containerName: user-container
-      resourceRange:
-        limits:
-          min: "200m"
-          max: "2"
+      fixedResources:
+        requests: "200m"
+        limits: "2"
   durationPolicy:
     apiCondition:
       url: "http://measure-yolo.serverless.svc.cluster.local/status"
