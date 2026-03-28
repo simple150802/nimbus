@@ -79,10 +79,14 @@ func getRespt(ctx context.Context, event *boostevent.BoostEvent, cpuValue string
 	// Apply CRD here
 	kubeapi.CreateStartupCPUBoost(ctx, event, cpuValue)
 
+	stop_ctx, cancel := context.WithCancel(context.Background())
+	go kubeapi.MonitorKsvcResources(stop_ctx, "serverless", "measure-yolo")
+
 	// Guarantee the CRD is deleted when this function finishes!
 	defer kubeapi.DeleteStartupCPUBoost(ctx, event.Metadata.Namespace, event.Metadata.Name)
 
 	responseTime, err := triggerHttp(event.Spec.DurationPolicy.ApiCondition)
+	cancel()
 
 	if err != nil {
 		logging.Failure("Failed to measure response time correctly:", err)

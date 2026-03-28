@@ -1,2 +1,3 @@
-- create a queue to store crd created
-- crd_queue:{crd1: crd.data, status}
+kubectl set env deployment/kube-startup-cpu-boost-controller-manager \
+  -n kube-startup-cpu-boost-system \
+  REMOVE_LIMITS=false

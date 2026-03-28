@@ -45,7 +45,7 @@ func CreateStartupCPUBoost(ctx context.Context, event *boostevent.BoostEvent, cp
 						{
 							"containerName": event.Spec.ResourcePolicy.ContainerPolicies[0].ContainerName,
 							"fixedResources": map[string]interface{}{
-								"requests": cpuValue,
+								"requests": "150m",
 								"limits":   cpuValue,
 							},
 						},

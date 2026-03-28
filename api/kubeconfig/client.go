@@ -11,11 +11,10 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-// ---------------------------------------------------------
-// 1. GLOBAL GVR VARIABLES (Highly Recommended)
-// ---------------------------------------------------------
-
 var (
+	// ---------------------------------------------------------
+	// 1. GLOBAL GVR VARIABLES
+	// ---------------------------------------------------------
 	ADV_GVR = schema.GroupVersionResource{
 		Group:    "lazyken.io.vn",
 		Version:  "v1alpha1",
@@ -27,13 +26,9 @@ var (
 		Version:  "v1alpha1",
 		Resource: "startupcpuboosts",
 	}
-)
-
-// ---------------------------------------------------------
-// 2. GLOBAL CLIENT VARIABLES (Use with caution!)
-// ---------------------------------------------------------
-
-var (
+	// ---------------------------------------------------------
+	// 2. GLOBAL CLIENT VARIABLES
+	// ---------------------------------------------------------
 	RESTCONFIG *rest.Config
 	DYNCLIENT  dynamic.Interface
 	CLIENTSET  *kubernetes.Clientset

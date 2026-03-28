@@ -16,8 +16,6 @@ import (
 	"lazyken-controller/api/logging"
 )
 
-
-
 // 2. The Producer
 func (bw *BoostWatcher) StartWatcher() {
 	watcher, err := DYNCLIENT.Resource(ADV_GVR).Namespace(metav1.NamespaceAll).Watch(context.TODO(), metav1.ListOptions{})
@@ -79,7 +77,6 @@ func (bw *BoostWatcher) RunWorker() {
 
 		// 3. Now we can safely print data
 		logging.Stage("STEP PROCESSING:", current.Metadata.Namespace, current.Metadata.Name)
-
 		algorithm.BinarySearch(context.TODO(), current)
 
 		bw.mu.RUnlock()

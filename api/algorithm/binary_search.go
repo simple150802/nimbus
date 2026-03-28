@@ -46,8 +46,20 @@ func BinarySearch(ctx context.Context, current *boostevent.BoostEvent) (string, 
 
 		// If response time improved by more than 10%, move the lower bound up
 		if float64(rtLow-rtMid)/float64(rtLow) > 0.1 {
-			current.Low = midCPU
-			rtLow = rtMid
+			// current.Low = midCPU
+			// rtLow = rtMid
+			// Change
+			rtHigh, err := getRespt(ctx, current, current.High)
+			if err != nil {
+				logging.Failure("Invalid CPU units:", err)
+				return "", err
+			}
+			if float64(rtMid-rtHigh)/float64(rtMid) > 0.1 {
+				current.Low = midCPU
+				rtLow = rtMid
+			} else {
+				current.High = midCPU
+			}
 		} else {
 			current.High = midCPU
 		}
