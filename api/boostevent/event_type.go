@@ -10,9 +10,14 @@ type BoostEvent struct {
 
 	Next *BoostEvent `json:"-"`
 
-	High      string `json:"-"`
-	Low       string `json:"-"`
-	Saturated bool   `json:"-"`
+	High string `json:"-"`
+	Low  string `json:"-"`
+
+	StartingSaturated bool   `json:"-"`
+	StartingCPU       string `json:"-"`
+
+	RunningSaturated bool   `json:"-"`
+	RunningCPU       string `json:"-"`
 }
 
 // ---------------------------------------------------------

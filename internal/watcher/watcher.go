@@ -71,8 +71,12 @@ func (bw *BoostWatcher) RunWorker() {
 			current = bw.head
 		}
 
-		if current.Saturated == true {
+		if current.StartingSaturated == true && current.RunningSaturated == true {
 			continue
+		}
+		if current.StartingSaturated == false && current.RunningSaturated == true || current.StartingSaturated == true && current.RunningSaturated == false {
+			logging.Failure("VERY CRITICAL ERR OCCUR !!!")
+			return
 		}
 
 		// 3. Now we can safely print data

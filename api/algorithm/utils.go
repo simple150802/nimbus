@@ -22,8 +22,8 @@ var (
 	ADV_GVR   = kubeconfig.ADV_GVR
 )
 
-func getRespt(ctx context.Context, event *boostevent.BoostEvent, cpuValue string) (time.Duration, error) {
-	logging.Stage("Measuring response time on", cpuValue, "CPU")
+func getResptCold(ctx context.Context, event *boostevent.BoostEvent, cpuValue string) (time.Duration, error) {
+	logging.Stage("Measuring response time cold on", cpuValue, "CPU")
 	// 2. Build the Label Selector String dynamically from the CRD
 	var selectorParts []string
 	for _, expr := range event.Selector.MatchExpressions {
@@ -86,6 +86,20 @@ func getRespt(ctx context.Context, event *boostevent.BoostEvent, cpuValue string
 	defer kubeapi.DeleteStartupCPUBoost(ctx, event.Metadata.Namespace, event.Metadata.Name)
 
 	responseTime, err := triggerHttp(event.Spec.DurationPolicy.ApiCondition)
+	logging.Normal("Final recorded cold start time was:", responseTime)
+
+	time.Sleep(2 * time.Second)
+	test, err := triggerHttp(event.Spec.DurationPolicy.ApiCondition)
+	logging.Normal("Test1:", test)
+
+	time.Sleep(2 * time.Second)
+	test2, err := triggerHttp(event.Spec.DurationPolicy.ApiCondition)
+	logging.Normal("Test2:", test2)
+
+	time.Sleep(2 * time.Second)
+	test3, err := triggerHttp(event.Spec.DurationPolicy.ApiCondition)
+	logging.Normal("Test3:", test3)
+
 	cancel()
 
 	if err != nil {
@@ -96,6 +110,102 @@ func getRespt(ctx context.Context, event *boostevent.BoostEvent, cpuValue string
 	logging.Normal("Final recorded cold start time was:", responseTime)
 	return responseTime, nil
 
+}
+
+func getResptWarm(ctx context.Context, event *boostevent.BoostEvent, cpuValue string, cpuCold string) (time.Duration, error) {
+	logging.Stage("Measuring response time warm on", cpuValue, "CPU")
+	// 2. Build the Label Selector String dynamically from the CRD
+	var selectorParts []string
+	for _, expr := range event.Selector.MatchExpressions {
+		vals := strings.Join(expr.Values, ",")
+
+		part := fmt.Sprintf("%s %s (%s)", expr.Key, strings.ToLower(expr.Operator), vals)
+		selectorParts = append(selectorParts, part)
+	}
+
+	// Join all expressions together with commas (creates a logical AND for the label selector)
+	labelSelector := strings.Join(selectorParts, ",")
+
+	deployments, err := CLIENTSET.AppsV1().Deployments(event.Metadata.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+
+	if err != nil {
+		logging.Failure("Failed to list deployments:", err)
+		return 0, err // Abort on API error
+	}
+
+	// If the array is empty, the app hasn't been applied yet!
+	if len(deployments.Items) == 0 {
+		logging.Warning("Target resource not found! Aborting test for this event.")
+		return 0, err
+	}
+
+	logging.Warning("Waiting for pods to scale down to 0...")
+
+	for {
+		pods, err := CLIENTSET.CoreV1().Pods(event.Metadata.Namespace).List(ctx, metav1.ListOptions{
+			LabelSelector: labelSelector,
+		})
+
+		if err != nil {
+			logging.Failure("Failed to list pods:", err)
+			return 0, err // Exit the function if there's a critical API error
+		}
+
+		// Check if we hit our target state!
+		if len(pods.Items) == 0 {
+			logging.Success("Pods successfully scaled to 0!")
+			break // Break out of the infinite loop
+		}
+
+		// Log the current count so you can see it working in the terminal
+		// logging.Normal("Still waiting... Found", len(pods.Items), "pods running.")
+
+		// Sleep for 2 seconds before asking the API again
+		time.Sleep(2 * time.Second)
+	}
+
+	// Apply CRD here
+	kubeapi.CreateStartupCPUBoost(ctx, event, cpuCold)
+
+	stop_ctx, cancel := context.WithCancel(context.Background())
+	go kubeapi.MonitorKsvcResources(stop_ctx, "serverless", "measure-yolo")
+
+	// Guarantee the CRD is deleted when this function finishes!
+	defer kubeapi.DeleteStartupCPUBoost(ctx, event.Metadata.Namespace, event.Metadata.Name)
+
+	_, err = triggerHttp(event.Spec.DurationPolicy.ApiCondition)
+	if err != nil {
+		logging.Failure("Failed to measure response time correctly:", err)
+		cancel()
+		return 0, err
+	}
+
+	var sum time.Duration
+	for i := 0; i < 10; i++ {
+		// 2. Trigger the HTTP call
+		responseTimeWarm, err := triggerHttp(event.Spec.DurationPolicy.ApiCondition)
+
+		if err != nil {
+			// Log the error and move to the next step, or handle as needed
+			fmt.Printf("Step %d failed: %v\n", i+1, err)
+			i -= 1
+		} else {
+			// 3. Store the result (assuming responseTimeCold is float64)
+			sum += responseTimeWarm
+		}
+
+		// 4. Wait for 2 seconds before the next iteration (except after the last one)
+		time.Sleep(2 * time.Second)
+	}
+
+	cancel()
+
+	avg := sum / 10
+
+	logging.Normal("Final recorded warm response time was:", avg)
+	return avg, nil
 }
 
 func triggerHttp(api_condition boostevent.ApiCondition) (time.Duration, error) {
