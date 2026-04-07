@@ -26,6 +26,12 @@ var (
 		Version:  "v1alpha1",
 		Resource: "startupcpuboosts",
 	}
+
+	KSVC_GVR = schema.GroupVersionResource{
+		Group:    "serving.knative.dev",
+		Version:  "v1",
+		Resource: "services",
+	}
 	// ---------------------------------------------------------
 	// 2. GLOBAL CLIENT VARIABLES
 	// ---------------------------------------------------------

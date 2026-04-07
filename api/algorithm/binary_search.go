@@ -9,22 +9,25 @@ import (
 )
 
 func BinarySearch(ctx context.Context, current *boostevent.BoostEvent) (string, error) {
-	binarySearchForStartingPhase(ctx, current)
+	// binarySearchForStartingPhase(ctx, current)
 	binarySearchForRunningPhase(ctx, current)
 
 	return current.High, nil
 }
 
 func binarySearchForRunningPhase(ctx context.Context, current *boostevent.BoostEvent) (string, error) {
+	// NOTE: Resource_limit of pod during starting phase must be higher than in running phase
+	// If not, an err will occur (Fix in future), currently just pray for err not occur ^^
 	current.Low = current.Spec.ResourcePolicy.ContainerPolicies[0].ResourceRange.Limits.Min
+	current.High = current.Spec.ResourcePolicy.ContainerPolicies[0].ResourceRange.Limits.Max //temp enable for testing purpose
 	runningLow, err := kubeapi.AdjustCPUMilli(current.Low, -50)
 	if err != nil {
 		return "", err
 	}
 	current.Low = runningLow
-	current.High = current.StartingCPU
+	// current.High = current.StartingCPU   //temp disable for testing purpose
 
-	rtLow, err := getResptWarm(ctx, current, current.Low, current.StartingCPU)
+	rtLow, err := getResptWarm(ctx, current, current.Low, current.High)
 	if err != nil {
 		logging.Failure("Skipping this CPU value due to error:", err)
 		// Note: Depending on your business logic, you might want to return here
@@ -53,7 +56,7 @@ func binarySearchForRunningPhase(ctx context.Context, current *boostevent.BoostE
 
 		logging.Info("Checking at", midCPU, "CPU ...")
 
-		rtMid, err := getResptWarm(ctx, current, midCPU, current.StartingCPU)
+		rtMid, err := getResptWarm(ctx, current, midCPU, current.High)
 		if err != nil {
 			logging.Failure("Skipping this CPU value due to error:", err)
 		}
@@ -63,7 +66,7 @@ func binarySearchForRunningPhase(ctx context.Context, current *boostevent.BoostE
 			// current.Low = midCPU
 			// rtLow = rtMid
 			// Change
-			rtHigh, err := getResptWarm(ctx, current, current.High, current.StartingCPU)
+			rtHigh, err := getResptWarm(ctx, current, current.High, current.High)
 			if err != nil {
 				logging.Failure("Invalid CPU units:", err)
 				return "", err

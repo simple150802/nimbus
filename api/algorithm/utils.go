@@ -129,16 +129,35 @@ func getResptWarm(ctx context.Context, event *boostevent.BoostEvent, cpuValue st
 	deployments, err := CLIENTSET.AppsV1().Deployments(event.Metadata.Namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: labelSelector,
 	})
-
 	if err != nil {
 		logging.Failure("Failed to list deployments:", err)
 		return 0, err // Abort on API error
 	}
-
 	// If the array is empty, the app hasn't been applied yet!
 	if len(deployments.Items) == 0 {
 		logging.Warning("Target resource not found! Aborting test for this event.")
 		return 0, err
+	}
+
+	ksvcName := "measure-yolo"
+
+	for _, d := range deployments.Items {
+		// 1. Log the current state from the existing Deployment
+		for _, container := range d.Spec.Template.Spec.Containers {
+			if container.Name == "user-container" {
+				oldCPU := container.Resources.Limits.Cpu()
+				logging.Info("Requesting Knative update for ", container.Name, " from ", oldCPU.String(), " to ", cpuValue)
+			}
+		}
+
+		// 2. Patch the KSVC instead of the Deployment
+		// This creates a NEW revision and a NEW deployment
+		err := kubeapi.PatchResourceLimits(ctx, d.Namespace, ksvcName, cpuValue)
+		if err != nil {
+			logging.Failure("Failed to patch Knative Service: ", err)
+			continue
+		}
+		logging.Info("Successfully triggered new Knative Revision for: ", ksvcName)
 	}
 
 	logging.Warning("Waiting for pods to scale down to 0...")
@@ -243,7 +262,7 @@ func triggerHttp(api_condition boostevent.ApiCondition) (time.Duration, error) {
 
 		// Check if the body contains our expected string
 		if strings.Contains(bodyString, expectedResponse) {
-			logging.Success(fmt.Sprintf("Cold start successful! Expected response received in %v", duration))
+			logging.Success(fmt.Sprintf("Receive response successful! Expected response received in %v", duration))
 			return duration, nil
 		}
 
