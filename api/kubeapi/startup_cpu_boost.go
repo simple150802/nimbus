@@ -3,8 +3,8 @@ package kubeapi
 import (
 	"context"
 	"encoding/json"
-	"lazyken-controller/api/boostevent"
-	"lazyken-controller/api/logging"
+	"recon/api/boostevent"
+	"recon/api/logging"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

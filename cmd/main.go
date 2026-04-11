@@ -1,12 +1,12 @@
 package main
 
 import (
-	"lazyken-controller/api/logging"
-	"lazyken-controller/internal/watcher"
+	"recon/api/logging"
+	"recon/internal/watcher"
 )
 
 func main() {
-	logging.Stage("Hello from LAZYken! Starting Controller...")
+	logging.Stage("Hello from LAZYken! Starting RECON...")
 
 	// 4. Initialize the Watcher struct with BOTH clients
 	myWatcher := watcher.NewBoostWatcher()

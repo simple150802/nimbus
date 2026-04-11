@@ -11,9 +11,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 
-	"lazyken-controller/api/algorithm"
-	"lazyken-controller/api/boostevent"
-	"lazyken-controller/api/logging"
+	"recon/api/algorithm"
+	"recon/api/boostevent"
+	"recon/api/logging"
 )
 
 // 2. The Producer

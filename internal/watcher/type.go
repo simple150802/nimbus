@@ -1,7 +1,7 @@
 package watcher
 
 import (
-	"lazyken-controller/api/boostevent"
+	"recon/api/boostevent"
 	"sync"
 )
 

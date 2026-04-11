@@ -3,9 +3,9 @@ package algorithm
 import (
 	"context"
 	"fmt"
-	"lazyken-controller/api/boostevent"
-	"lazyken-controller/api/kubeapi"
-	"lazyken-controller/api/logging"
+	"recon/api/boostevent"
+	"recon/api/kubeapi"
+	"recon/api/logging"
 )
 
 func BinarySearch(ctx context.Context, current *boostevent.BoostEvent) (string, error) {

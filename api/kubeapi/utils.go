@@ -1,7 +1,7 @@
 package kubeapi
 
 import (
-	"lazyken-controller/api/kubeconfig"
+	"recon/api/kubeconfig"
 )
 
 var (

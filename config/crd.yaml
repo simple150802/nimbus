@@ -1,17 +1,17 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: advancestartupcpuboosts.lazyken.io.vn
+  name: recons.lazyken.io
 spec:
   # Your custom API group
-  group: lazyken.io.vn
+  group: lazyken.io
   scope: Namespaced
   names:
-    plural: advancestartupcpuboosts
-    singular: advancestartupcpuboost
-    kind: AdvanceStartupCPUBoost
+    plural: recons
+    singular: recon
+    kind: Recon
     shortNames:
-    - ascb
+    - rc
   versions:
     - name: v1alpha1
       served: true

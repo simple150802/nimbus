@@ -1,4 +1,4 @@
-module lazyken-controller
+module recon
 
 go 1.26.1
 
