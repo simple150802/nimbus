@@ -80,25 +80,13 @@ func getResptCold(ctx context.Context, event *boostevent.BoostEvent, cpuValue st
 	kubeapi.CreateStartupCPUBoost(ctx, event, cpuValue)
 
 	stop_ctx, cancel := context.WithCancel(context.Background())
-	go kubeapi.MonitorKsvcResources(stop_ctx, "serverless", "measure-yolo")
+	go kubeapi.MonitorKsvcResources(stop_ctx, event.Metadata.Namespace, event.Selector.MatchExpressions[0].Values[0])
 
 	// Guarantee the CRD is deleted when this function finishes!
 	defer kubeapi.DeleteStartupCPUBoost(ctx, event.Metadata.Namespace, event.Metadata.Name)
 
 	responseTime, err := triggerHttp(event.Spec.DurationPolicy.ApiCondition)
 	logging.Normal("Final recorded cold start time was:", responseTime)
-
-	time.Sleep(2 * time.Second)
-	test, err := triggerHttp(event.Spec.DurationPolicy.ApiCondition)
-	logging.Normal("Test1:", test)
-
-	time.Sleep(2 * time.Second)
-	test2, err := triggerHttp(event.Spec.DurationPolicy.ApiCondition)
-	logging.Normal("Test2:", test2)
-
-	time.Sleep(2 * time.Second)
-	test3, err := triggerHttp(event.Spec.DurationPolicy.ApiCondition)
-	logging.Normal("Test3:", test3)
 
 	cancel()
 
@@ -139,26 +127,31 @@ func getResptWarm(ctx context.Context, event *boostevent.BoostEvent, cpuValue st
 		return 0, err
 	}
 
-	ksvcName := "measure-yolo"
-
-	for _, d := range deployments.Items {
-		// 1. Log the current state from the existing Deployment
-		for _, container := range d.Spec.Template.Spec.Containers {
-			if container.Name == "user-container" {
-				oldCPU := container.Resources.Limits.Cpu()
-				logging.Info("Requesting Knative update for ", container.Name, " from ", oldCPU.String(), " to ", cpuValue)
-			}
+	d := deployments.Items[0]
+	// logging.Failure("LEN: ", len((deployments.Items)))
+	// 1. Log the current state from the existing Deployment
+	for _, container := range d.Spec.Template.Spec.Containers {
+		if container.Name == "user-container" {
+			oldCPU := container.Resources.Limits.Cpu()
+			logging.Info("Requesting Knative update for ", container.Name, " from ", oldCPU.String(), " to ", cpuValue)
 		}
-
-		// 2. Patch the KSVC instead of the Deployment
-		// This creates a NEW revision and a NEW deployment
-		err := kubeapi.PatchResourceLimits(ctx, d.Namespace, ksvcName, cpuValue)
-		if err != nil {
-			logging.Failure("Failed to patch Knative Service: ", err)
-			continue
-		}
-		logging.Info("Successfully triggered new Knative Revision for: ", ksvcName)
 	}
+
+	// 2. Patch the KSVC instead of the Deployment
+	// This creates a NEW revision and a NEW deployment
+	err = kubeapi.PatchResourceLimits(ctx, event.Metadata.Namespace, event.Selector.MatchExpressions[0].Values[0], cpuValue)
+	if err != nil {
+		logging.Failure("Failed to patch Knative Service: ", err)
+		return 0, err
+	}
+
+	err = kubeapi.PatchMaxScale(ctx, event.Metadata.Namespace, event.Selector.MatchExpressions[0].Values[0])
+	if err != nil {
+		logging.Failure("Failed to patch Knative Service: ", err)
+		return 0, err
+	}
+
+	logging.Info("Successfully triggered new Knative Revision for: ", event.Selector.MatchExpressions[0].Values[0])
 
 	logging.Warning("Waiting for pods to scale down to 0...")
 
@@ -189,7 +182,7 @@ func getResptWarm(ctx context.Context, event *boostevent.BoostEvent, cpuValue st
 	kubeapi.CreateStartupCPUBoost(ctx, event, cpuCold)
 
 	stop_ctx, cancel := context.WithCancel(context.Background())
-	go kubeapi.MonitorKsvcResources(stop_ctx, "serverless", "measure-yolo")
+	go kubeapi.MonitorKsvcResources(stop_ctx, event.Metadata.Namespace, event.Selector.MatchExpressions[0].Values[0])
 
 	// Guarantee the CRD is deleted when this function finishes!
 	defer kubeapi.DeleteStartupCPUBoost(ctx, event.Metadata.Namespace, event.Metadata.Name)
@@ -204,6 +197,15 @@ func getResptWarm(ctx context.Context, event *boostevent.BoostEvent, cpuValue st
 	var sum time.Duration
 	for i := 0; i < 10; i++ {
 		// 2. Trigger the HTTP call
+		if i == 0 {
+			_, err := triggerHttp(event.Spec.DurationPolicy.ApiCondition)
+			if err != nil {
+				// Log the error and move to the next step, or handle as needed
+				fmt.Printf("Step %d failed: %v\n", i+1, err)
+				i -= 1
+				continue
+			}
+		}
 		responseTimeWarm, err := triggerHttp(event.Spec.DurationPolicy.ApiCondition)
 
 		if err != nil {
@@ -262,7 +264,7 @@ func triggerHttp(api_condition boostevent.ApiCondition) (time.Duration, error) {
 
 		// Check if the body contains our expected string
 		if strings.Contains(bodyString, expectedResponse) {
-			logging.Success(fmt.Sprintf("Receive response successful! Expected response received in %v", duration))
+			logging.Success("Receive response successful! Expected response received in ", duration)
 			return duration, nil
 		}
 

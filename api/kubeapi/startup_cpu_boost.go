@@ -2,11 +2,14 @@ package kubeapi
 
 import (
 	"context"
+	"encoding/json"
 	"lazyken-controller/api/boostevent"
 	"lazyken-controller/api/logging"
 
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 func DeleteStartupCPUBoost(ctx context.Context, namespace string, name string) {
@@ -21,7 +24,7 @@ func DeleteStartupCPUBoost(ctx context.Context, namespace string, name string) {
 }
 
 func CreateStartupCPUBoost(ctx context.Context, event *boostevent.BoostEvent, cpuValue string) {
-	// Map your Struct data into the Unstructured format
+	// 1. Define the desired state (same as your current map)
 	cr := &unstructured.Unstructured{
 		Object: map[string]interface{}{
 			"apiVersion": "autoscaling.x-k8s.io/v1alpha1",
@@ -61,10 +64,41 @@ func CreateStartupCPUBoost(ctx context.Context, event *boostevent.BoostEvent, cp
 		},
 	}
 
-	_, err := DYNCLIENT.Resource(STD_GVR).Namespace(event.Metadata.Namespace).Create(ctx, cr, metav1.CreateOptions{})
+	resourceClient := DYNCLIENT.Resource(STD_GVR).Namespace(event.Metadata.Namespace)
+
+	// 2. Check if it already exists
+	_, err := resourceClient.Get(ctx, event.Metadata.Name, metav1.GetOptions{})
+
 	if err != nil {
-		logging.Failure("Failed to create CRD:", err)
+		if errors.IsNotFound(err) {
+			// 3. CASE: Doesn't exist -> CREATE
+			_, err = resourceClient.Create(ctx, cr, metav1.CreateOptions{})
+			if err != nil {
+				logging.Failure("Failed to create CRD:", err)
+				return
+			}
+			logging.Success("Successfully created StartupCPUBoost!")
+		} else {
+			// CASE: System error
+			logging.Failure("Error checking for existing CRD:", err)
+		}
+		return
 	}
 
-	logging.Success("Successfully created StartupCPUBoost!")
+	// 4. CASE: Exists -> PATCH
+	payloadBytes, _ := json.Marshal(cr.Object)
+	_, err = resourceClient.Patch(
+		ctx,
+		event.Metadata.Name,
+		types.MergePatchType, // MergePatch updates fields without replacing the whole object
+		payloadBytes,
+		metav1.PatchOptions{},
+	)
+
+	if err != nil {
+		logging.Failure("Failed to patch existing CRD:", err)
+		return
+	}
+
+	logging.Success("Successfully updated existing StartupCPUBoost!")
 }

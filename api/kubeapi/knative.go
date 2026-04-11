@@ -90,3 +90,32 @@ func PatchResourceLimits(ctx context.Context, namespace, ksvcName, cpuLimit stri
 
 	return err
 }
+
+// PatchMaxScale updates the Knative maxScale annotation to 1
+func PatchMaxScale(ctx context.Context, namespace, ksvcName string) error {
+	// We use "add" instead of "replace" because "add" will work
+	// even if the annotation doesn't exist yet (it acts as an upsert).
+	patchPayload := []map[string]interface{}{
+		{
+			"op":    "add",
+			"path":  "/spec/template/metadata/annotations/autoscaling.knative.dev~1max-scale",
+			"value": "1",
+		},
+	}
+
+	payloadBytes, err := json.Marshal(patchPayload)
+	if err != nil {
+		return err
+	}
+
+	// Using the Dynamic Client to patch the KSVC
+	_, err = DYNCLIENT.Resource(KSVC_GVR).Namespace(namespace).Patch(
+		ctx,
+		ksvcName,
+		types.JSONPatchType,
+		payloadBytes,
+		metav1.PatchOptions{},
+	)
+
+	return err
+}

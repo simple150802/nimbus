@@ -1,5 +1,5 @@
-# startup-boost-controller
-Controller for managing resource in startup phase
+# RECON
+Resource Engine for CPU Operational Normalization
 
 ## Google kube-Startup-CPU-Boost
 
@@ -22,7 +22,7 @@ To address these bottlenecks, this project introduces a refined architecture opt
 
 - **Intelligent Resource Profiling**: Replaces static, hardcoded values with a Dynamic Range Strategy. The controller automatically selects the optimal CPU limit from a user-defined range based on real-time node capacity and workload requirements
 
-## The New Custom Resource Definition (CRD) - startup-boost-controller
+## The New Custom Resource Definition (CRD) - RECON
 
 To provide granular control over how and when the CPU boost is applied, we introduced the `StartupCPUBoost` CRD.
 
