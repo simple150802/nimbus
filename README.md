@@ -37,8 +37,8 @@ This CRD allows cluster administrators and developers to define:
 - The specific conditions or probes that signal the end of the "startup" phase.
 
 ```yaml
-apiVersion: lazyken.io.vn/v1alpha1
-kind: AdvanceStartupCPUBoost
+apiVersion: lazyken.io/v1alpha1
+kind: Recon
 metadata:
   name: boost-001
   namespace: serverless
