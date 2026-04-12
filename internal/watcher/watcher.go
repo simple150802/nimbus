@@ -13,12 +13,13 @@ import (
 
 	"recon/api/algorithm"
 	"recon/api/boostevent"
+	"recon/api/kubeapi"
 	"recon/api/logging"
 )
 
 // 2. The Producer
 func (bw *BoostWatcher) StartWatcher() {
-	watcher, err := DYNCLIENT.Resource(ADV_GVR).Namespace(metav1.NamespaceAll).Watch(context.TODO(), metav1.ListOptions{})
+	watcher, err := DYNCLIENT.Resource(RECON_GVR).Namespace(metav1.NamespaceAll).Watch(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		logging.Failure("Error starting watcher:", err)
 		return
@@ -82,6 +83,11 @@ func (bw *BoostWatcher) RunWorker() {
 		// 3. Now we can safely print data
 		logging.Stage("STEP PROCESSING:", current.Metadata.Namespace, current.Metadata.Name)
 		algorithm.BinarySearch(context.TODO(), current)
+
+		kubeapi.CreateStartupCPUBoost(context.TODO(), current, current.StartingCPU)
+		for _, ksvc := range current.Selector.MatchExpressions[0].Values {
+			kubeapi.PatchResourceLimits(context.TODO(), current.Metadata.Namespace, ksvc, current.RunningCPU)
+		}
 
 		bw.mu.RUnlock()
 		time.Sleep(2 * time.Second)

@@ -15,7 +15,7 @@ var (
 	// ---------------------------------------------------------
 	// 1. GLOBAL GVR VARIABLES
 	// ---------------------------------------------------------
-	ADV_GVR = schema.GroupVersionResource{
+	RECON_GVR = schema.GroupVersionResource{
 		Group:    "lazyken.io",
 		Version:  "v1alpha1",
 		Resource: "recons",

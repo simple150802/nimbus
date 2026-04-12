@@ -6,11 +6,17 @@ import (
 	"recon/api/boostevent"
 	"recon/api/kubeapi"
 	"recon/api/logging"
+	"time"
 )
 
 func BinarySearch(ctx context.Context, current *boostevent.BoostEvent) (string, error) {
-	// binarySearchForStartingPhase(ctx, current)
+	binarySearchForStartingPhase(ctx, current)
 	binarySearchForRunningPhase(ctx, current)
+
+	logging.Info("CPU for starting phase: ", current.StartingCPU)
+	logging.Info("CPU for running phase: ", current.RunningCPU)
+
+	time.Sleep(1000000 * time.Second)
 
 	return current.High, nil
 }
@@ -19,13 +25,13 @@ func binarySearchForRunningPhase(ctx context.Context, current *boostevent.BoostE
 	// NOTE: Resource_limit of pod during starting phase must be higher than in running phase
 	// If not, an err will occur (Fix in future), currently just pray for err not occur ^^
 	current.Low = current.Spec.ResourcePolicy.ContainerPolicies[0].ResourceRange.Limits.Min
-	current.High = current.Spec.ResourcePolicy.ContainerPolicies[0].ResourceRange.Limits.Max //temp enable for testing purpose
+	// current.High = current.Spec.ResourcePolicy.ContainerPolicies[0].ResourceRange.Limits.Max //temp enable for testing purpose
 	runningLow, err := kubeapi.AdjustCPUMilli(current.Low, -50)
 	if err != nil {
 		return "", err
 	}
 	current.Low = runningLow
-	// current.High = current.StartingCPU   //temp disable for testing purpose
+	current.High = current.StartingCPU //temp disable for testing purpose
 
 	rtLow, err := getResptWarm(ctx, current, current.Low, current.High)
 	if err != nil {

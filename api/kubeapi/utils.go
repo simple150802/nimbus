@@ -8,6 +8,6 @@ var (
 	DYNCLIENT = kubeconfig.DYNCLIENT
 	CLIENTSET = kubeconfig.CLIENTSET
 	STD_GVR   = kubeconfig.STD_GVR
-	ADV_GVR   = kubeconfig.ADV_GVR
+	RECON_GVR = kubeconfig.RECON_GVR
 	KSVC_GVR  = kubeconfig.KSVC_GVR
 )

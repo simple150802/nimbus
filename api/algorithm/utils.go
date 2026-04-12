@@ -19,7 +19,7 @@ var (
 	DYNCLIENT = kubeconfig.DYNCLIENT
 	CLIENTSET = kubeconfig.CLIENTSET
 	STD_GVR   = kubeconfig.STD_GVR
-	ADV_GVR   = kubeconfig.ADV_GVR
+	RECON_GVR = kubeconfig.RECON_GVR
 )
 
 func getResptCold(ctx context.Context, event *boostevent.BoostEvent, cpuValue string) (time.Duration, error) {
