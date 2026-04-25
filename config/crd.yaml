@@ -3,7 +3,6 @@ kind: CustomResourceDefinition
 metadata:
   name: recons.lazyken.io
 spec:
-  # Your custom API group
   group: lazyken.io
   scope: Namespaced
   names:
@@ -11,66 +10,160 @@ spec:
     singular: recon
     kind: Recon
     shortNames:
-    - rc
+      - rc
   versions:
     - name: v1alpha1
       served: true
       storage: true
       subresources:
         status: {}
+      additionalPrinterColumns:
+        - name: Starting CPU
+          type: string
+          jsonPath: .status.startingCpu
+        - name: Running CPU
+          type: string
+          jsonPath: .status.runningCpu
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
       schema:
         openAPIV3Schema:
+          description: |
+            Recon declares a Knative service whose startup- and running-phase
+            CPU limits should be auto-profiled by the RECON controller using
+            a binary search. Finalized values are written to .status and, once
+            present, cause the controller to skip re-probing on subsequent
+            restarts or re-applies.
           type: object
+          required: [spec, selector]
           properties:
-            status:
-              type: object
-              properties:
-                runningCpu:
-                  type: string
-                startingCpu:
-                  type: string
-            # 1. The Selector Block (at the root level based on your image)
-            selector:
-              type: object
-              properties:
-                matchExpressions:
-                  type: array
-                  items:
-                    type: object
-                    properties:
-                      key: { type: string }
-                      operator: { type: string }
-                      values:
-                        type: array
-                        items: { type: string }
-            # 2. The Spec Block
             spec:
+              description: Desired state — what to profile and when the startup phase ends.
               type: object
+              required: [resourcePolicy, durationPolicy]
               properties:
-                resourcePolicy:
+                measurement:
+                  description: |
+                    Controls how many samples the controller averages per
+                    probe. Cold samples are expensive — each forces a
+                    scale-to-zero before a fresh cold start — so keep this
+                    low unless you explicitly want robustness over speed.
+                    Warm samples are cheap and run against an already-up pod.
+                    Omit the field to accept the defaults.
                   type: object
+                  default: {}
+                  properties:
+                    coldSamples:
+                      description: Cold-start samples per probe (default 1).
+                      type: integer
+                      minimum: 1
+                      default: 1
+                    warmSamples:
+                      description: Warm samples per probe; response time is averaged (default 10).
+                      type: integer
+                      minimum: 1
+                      default: 10
+                resourcePolicy:
+                  description: Per-container CPU range the binary search operates within.
+                  type: object
+                  required: [containerPolicies]
                   properties:
                     containerPolicies:
+                      description: |
+                        One entry per target container. The controller currently
+                        only honors entry [0].
                       type: array
+                      minItems: 1
                       items:
                         type: object
+                        required: [containerName, resourceRange]
                         properties:
                           containerName:
+                            description: Name of the container inside the pod (e.g. "user-container").
                             type: string
-                          # HERE IS YOUR NEW RANGE CONCEPT:
                           resourceRange:
+                            description: CPU bounds the binary search will probe within.
                             type: object
+                            required: [limits]
                             properties:
                               limits:
                                 type: object
+                                required: [min, max]
                                 properties:
-                                  min: { type: string }
-                                  max: { type: string }
+                                  min:
+                                    description: Lower bound of the CPU search range (Kubernetes quantity, e.g. "200m").
+                                    type: string
+                                    pattern: "^(\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))))?$"
+                                  max:
+                                    description: Upper bound of the CPU search range (Kubernetes quantity, e.g. "2" or "2000m").
+                                    type: string
+                                    pattern: "^(\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))))?$"
                 durationPolicy:
+                  description: |
+                    Signal the controller uses to declare the startup phase
+                    finished. Only apiCondition is implemented today; fixed
+                    and podCondition policies supported by the upstream
+                    StartupCPUBoost CRD are not honored here.
                   type: object
+                  required: [apiCondition]
                   properties:
                     apiCondition:
+                      description: HTTP probe whose body, once matched, ends the startup phase.
                       type: object
+                      required: [url, response]
                       properties:
-                        url: { type: string }
-                        response: { type: string }
+                        url:
+                          description: Cluster-internal URL the controller GETs during profiling.
+                          type: string
+                        response:
+                          description: Substring the controller looks for in the response body to declare readiness.
+                          type: string
+            selector:
+              description: |
+                Names the target Knative service(s) by label. The current
+                controller treats matchExpressions[0].values as an enumerated
+                list of ksvc names; only the "In" operator is supported.
+              type: object
+              required: [matchExpressions]
+              properties:
+                matchExpressions:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    required: [key, operator, values]
+                    properties:
+                      key:
+                        description: |
+                          Label key to match. For Knative services this is
+                          typically "serving.knative.dev/service".
+                        type: string
+                      operator:
+                        description: |
+                          Set membership operator. RECON only implements "In"
+                          today; other values Kubernetes allows (NotIn,
+                          Exists, DoesNotExist) will be ignored.
+                        type: string
+                        enum: [In]
+                      values:
+                        description: Knative service names to profile.
+                        type: array
+                        minItems: 1
+                        items:
+                          type: string
+            status:
+              description: |
+                Observed state — filled in by the controller. When both
+                startingCpu and runningCpu are non-empty, the binary search
+                has completed and subsequent controller restarts will
+                re-apply these values without re-probing. To force a
+                re-search, clear both fields via the status subresource.
+              type: object
+              properties:
+                startingCpu:
+                  description: Finalized CPU limit for the startup phase.
+                  type: string
+                runningCpu:
+                  description: Finalized CPU limit for the running phase.
+                  type: string

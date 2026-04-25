@@ -9,6 +9,12 @@ selector:
     operator: In
     values: ["measure-yolo"]
 spec:
+  # measurement is optional; omit to accept the defaults (1 cold sample,
+  # 10 warm samples). Cold samples are expensive because each forces a
+  # scale-to-zero before a fresh cold start.
+  measurement:
+    coldSamples: 3
+    warmSamples: 3
   resourcePolicy:
     containerPolicies:
     - containerName: user-container

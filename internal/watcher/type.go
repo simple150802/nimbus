@@ -11,6 +11,11 @@ type BoostWatcher struct {
 
 	// 🔒 The Lock: Prevents the Watcher and Worker from crashing the app
 	mu sync.RWMutex
+
+	// completed holds Recons whose RunningCPU is finalized, keyed by
+	// "<namespace>/<name>". The ksvc watcher reads it to decide whether to
+	// propagate RunningCPU to a newly-created ksvc. Protected by mu.
+	completed map[string]*boostevent.BoostEvent
 }
 
 func (bw *BoostWatcher) Enqueue(newEvent *boostevent.BoostEvent) {
@@ -83,5 +88,7 @@ func (bw *BoostWatcher) Dequeue(target *boostevent.BoostEvent) *boostevent.Boost
 }
 
 func NewBoostWatcher() *BoostWatcher {
-	return &BoostWatcher{}
+	return &BoostWatcher{
+		completed: make(map[string]*boostevent.BoostEvent),
+	}
 }

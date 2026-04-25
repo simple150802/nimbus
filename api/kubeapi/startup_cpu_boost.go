@@ -3,6 +3,7 @@ package kubeapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"recon/api/boostevent"
 	"recon/api/logging"
 
@@ -24,6 +25,9 @@ func DeleteStartupCPUBoost(ctx context.Context, namespace string, name string) {
 }
 
 func CreateStartupCPUBoost(ctx context.Context, event *boostevent.BoostEvent, cpuValue string) {
+	logging.Info(fmt.Sprintf("[set] StartupCPUBoost -> ns=%s name=%s limits=%s",
+		event.Metadata.Namespace, event.Metadata.Name, cpuValue))
+
 	// 1. Define the desired state (same as your current map)
 	cr := &unstructured.Unstructured{
 		Object: map[string]interface{}{

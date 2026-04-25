@@ -1,22 +1,40 @@
 package algorithm
 
 import (
-	"context"
 	"fmt"
+
+	"context"
 	"recon/api/boostevent"
 	"recon/api/kubeapi"
 	"recon/api/logging"
-	"time"
 )
 
 func BinarySearch(ctx context.Context, current *boostevent.BoostEvent) (string, error) {
-	binarySearchForStartingPhase(ctx, current)
-	binarySearchForRunningPhase(ctx, current)
+	ns := current.Metadata.Namespace
+	ksvc := current.Selector.MatchExpressions[0].Values[0]
+
+	// Pin the ksvc to one pod for the whole search — both the starting and
+	// running phases need deterministic measurement, so neither should share
+	// traffic across multiple pods. Cleared on any exit path via defer so the
+	// cap never outlives the search.
+	if err := kubeapi.PatchMaxScale(ctx, ns, ksvc); err != nil {
+		return "", fmt.Errorf("failed to set maxScale=1 before binary search: %w", err)
+	}
+	defer func() {
+		if err := kubeapi.UnsetMaxScale(ctx, ns, ksvc); err != nil {
+			logging.Warning("failed to unset maxScale after binary search:", err)
+		}
+	}()
+
+	if _, err := binarySearchForStartingPhase(ctx, current); err != nil {
+		return "", fmt.Errorf("starting phase aborted: %w", err)
+	}
+	if _, err := binarySearchForRunningPhase(ctx, current); err != nil {
+		return "", fmt.Errorf("running phase aborted: %w", err)
+	}
 
 	logging.Info("CPU for starting phase: ", current.StartingCPU)
 	logging.Info("CPU for running phase: ", current.RunningCPU)
-
-	time.Sleep(1000000 * time.Second)
 
 	return current.High, nil
 }
@@ -25,19 +43,16 @@ func binarySearchForRunningPhase(ctx context.Context, current *boostevent.BoostE
 	// NOTE: Resource_limit of pod during starting phase must be higher than in running phase
 	// If not, an err will occur (Fix in future), currently just pray for err not occur ^^
 	current.Low = current.Spec.ResourcePolicy.ContainerPolicies[0].ResourceRange.Limits.Min
-	// current.High = current.Spec.ResourcePolicy.ContainerPolicies[0].ResourceRange.Limits.Max //temp enable for testing purpose
 	runningLow, err := kubeapi.AdjustCPUMilli(current.Low, -50)
 	if err != nil {
 		return "", err
 	}
 	current.Low = runningLow
-	current.High = current.StartingCPU //temp disable for testing purpose
+	current.High = current.StartingCPU
 
 	rtLow, err := getResptWarm(ctx, current, current.Low, current.High)
 	if err != nil {
-		logging.Failure("Skipping this CPU value due to error:", err)
-		// Note: Depending on your business logic, you might want to return here
-		// if rtLow is invalid, to avoid a divide-by-zero panic later.
+		return "", err
 	}
 
 	for {
@@ -49,9 +64,9 @@ func binarySearchForRunningPhase(ctx context.Context, current *boostevent.BoostE
 
 		if !shouldContinue {
 			logging.Success(fmt.Sprintf("Binary Search Complete! The optimal CPU limit is: %s", current.High))
-			current.StartingSaturated = true
+			current.RunningSaturated = true
 			current.RunningCPU = current.High
-			return current.RunningCPU, nil // Return the optimal value
+			return current.RunningCPU, nil
 		}
 
 		midCPU, err := kubeapi.CalculateAverageCPU(current.Low, current.High)
@@ -64,17 +79,13 @@ func binarySearchForRunningPhase(ctx context.Context, current *boostevent.BoostE
 
 		rtMid, err := getResptWarm(ctx, current, midCPU, current.High)
 		if err != nil {
-			logging.Failure("Skipping this CPU value due to error:", err)
+			return "", err
 		}
 
 		// If response time improved by more than 10%, move the lower bound up
 		if float64(rtLow-rtMid)/float64(rtLow) > 0.1 {
-			// current.Low = midCPU
-			// rtLow = rtMid
-			// Change
 			rtHigh, err := getResptWarm(ctx, current, current.High, current.High)
 			if err != nil {
-				logging.Failure("Invalid CPU units:", err)
 				return "", err
 			}
 			if float64(rtMid-rtHigh)/float64(rtMid) > 0.1 {
@@ -95,9 +106,7 @@ func binarySearchForStartingPhase(ctx context.Context, current *boostevent.Boost
 
 	rtLow, err := getResptCold(ctx, current, current.Low)
 	if err != nil {
-		logging.Failure("Skipping this CPU value due to error:", err)
-		// Note: Depending on your business logic, you might want to return here
-		// if rtLow is invalid, to avoid a divide-by-zero panic later.
+		return "", err
 	}
 
 	for {
@@ -111,7 +120,7 @@ func binarySearchForStartingPhase(ctx context.Context, current *boostevent.Boost
 			logging.Success(fmt.Sprintf("Binary Search Complete! The optimal CPU limit is: %s", current.High))
 			current.StartingSaturated = true
 			current.StartingCPU = current.High
-			return current.StartingCPU, nil // Return the optimal value
+			return current.StartingCPU, nil
 		}
 
 		midCPU, err := kubeapi.CalculateAverageCPU(current.Low, current.High)
@@ -124,17 +133,13 @@ func binarySearchForStartingPhase(ctx context.Context, current *boostevent.Boost
 
 		rtMid, err := getResptCold(ctx, current, midCPU)
 		if err != nil {
-			logging.Failure("Skipping this CPU value due to error:", err)
+			return "", err
 		}
 
 		// If response time improved by more than 10%, move the lower bound up
 		if float64(rtLow-rtMid)/float64(rtLow) > 0.1 {
-			// current.Low = midCPU
-			// rtLow = rtMid
-			// Change
 			rtHigh, err := getResptCold(ctx, current, current.High)
 			if err != nil {
-				logging.Failure("Invalid CPU units:", err)
 				return "", err
 			}
 			if float64(rtMid-rtHigh)/float64(rtMid) > 0.1 {

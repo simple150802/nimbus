@@ -8,6 +8,11 @@ type BoostEvent struct {
 	Selector BoostSelector `json:"selector"`
 	Spec     BoostSpec     `json:"spec"`
 
+	// Status mirrors the CRD's .status subresource. When both StartingCpu and
+	// RunningCpu are non-empty, the binary search has already been completed
+	// for this Recon and the worker skips re-running it.
+	Status BoostStatus `json:"status"`
+
 	Next *BoostEvent `json:"-"`
 
 	High string `json:"-"`
@@ -18,6 +23,13 @@ type BoostEvent struct {
 
 	RunningSaturated bool   `json:"-"`
 	RunningCPU       string `json:"-"`
+}
+
+// BoostStatus reflects the Recon CRD's .status subresource. Field names must
+// match the JSON keys declared in config/crd.yaml exactly.
+type BoostStatus struct {
+	StartingCpu string `json:"startingCpu,omitempty"`
+	RunningCpu  string `json:"runningCpu,omitempty"`
 }
 
 // ---------------------------------------------------------
@@ -42,8 +54,18 @@ type MatchExpression struct {
 // 3. The Core Spec
 // ---------------------------------------------------------
 type BoostSpec struct {
-	ResourcePolicy ResourcePolicy `json:"resourcePolicy"`
-	DurationPolicy DurationPolicy `json:"durationPolicy"`
+	ResourcePolicy ResourcePolicy    `json:"resourcePolicy"`
+	DurationPolicy DurationPolicy    `json:"durationPolicy"`
+	Measurement    MeasurementPolicy `json:"measurement,omitempty"`
+}
+
+// MeasurementPolicy controls how many samples the controller averages per
+// probe. When the Recon omits this field the CRD defaults (1 cold sample,
+// 10 warm samples) apply; values of 0 or less fall back to those defaults
+// defensively so the controller never divides by zero.
+type MeasurementPolicy struct {
+	ColdSamples int `json:"coldSamples,omitempty"`
+	WarmSamples int `json:"warmSamples,omitempty"`
 }
 
 // --- Resource Policy Tree ---
