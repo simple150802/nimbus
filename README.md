@@ -4,6 +4,10 @@
 
 <h1 align="center">NIMBUS</h1>
 
+<p align="center">
+  <b>N</b>ative <b>I</b>terative <b>M</b>easurement for <b>B</b>oost &amp; <b>U</b>tilization <b>S</b>izing
+</p>
+
 <p align="center"><i>Two-phase CPU auto-profiling for Knative services.</i></p>
 
 ---

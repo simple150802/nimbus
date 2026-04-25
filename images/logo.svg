@@ -1,21 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 160" role="img" aria-label="NIMBUS logo">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 220" role="img" aria-label="NIMBUS logo">
   <title>NIMBUS</title>
+  <polygon points="110,15 192,62 192,158 110,205 28,158 28,62"
+           fill="#fff" stroke="#326CE5" stroke-width="10" stroke-linejoin="round"/>
   <g fill="#326CE5">
-    <circle cx="70" cy="90" r="32"/>
-    <circle cx="120" cy="68" r="40"/>
-    <circle cx="165" cy="92" r="28"/>
-    <rect x="50" y="92" width="135" height="42" rx="22"/>
-  </g>
-  <g transform="translate(115 95)" stroke="#fff" stroke-width="3.5" stroke-linecap="round" fill="none">
-    <circle r="26"/>
-    <circle r="5" fill="#fff" stroke="none"/>
-    <line x1="0" y1="-23" x2="0" y2="-9"/>
-    <line x1="0" y1="9" x2="0" y2="23"/>
-    <line x1="-23" y1="0" x2="-9" y2="0"/>
-    <line x1="9" y1="0" x2="23" y2="0"/>
-    <line x1="-16" y1="-16" x2="-7" y2="-7"/>
-    <line x1="7" y1="7" x2="16" y2="16"/>
-    <line x1="-16" y1="16" x2="-7" y2="7"/>
-    <line x1="7" y1="-7" x2="16" y2="-16"/>
+    <rect x="55" y="82"  width="110" height="14" rx="7"/>
+    <rect x="70" y="103" width="80"  height="14" rx="7" opacity="0.7"/>
+    <rect x="85" y="124" width="50"  height="14" rx="7" opacity="0.45"/>
   </g>
 </svg>
