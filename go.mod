@@ -1,4 +1,4 @@
-module recon
+module nimbus
 
 go 1.26.1
 

@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"recon/api/boostevent"
-	"recon/api/logging"
+	"nimbus/api/nimbusevent"
+	"nimbus/api/logging"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -24,7 +24,7 @@ func DeleteStartupCPUBoost(ctx context.Context, namespace string, name string) {
 	logging.Success("Successfully cleaned up cluster state!")
 }
 
-func CreateStartupCPUBoost(ctx context.Context, event *boostevent.BoostEvent, cpuValue string) {
+func CreateStartupCPUBoost(ctx context.Context, event *nimbusevent.NimbusEvent, cpuValue string) {
 	logging.Info(fmt.Sprintf("[set] StartupCPUBoost -> ns=%s name=%s limits=%s",
 		event.Metadata.Namespace, event.Metadata.Name, cpuValue))
 

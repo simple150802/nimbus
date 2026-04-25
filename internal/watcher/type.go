@@ -1,24 +1,24 @@
 package watcher
 
 import (
-	"recon/api/boostevent"
+	"nimbus/api/nimbusevent"
 	"sync"
 )
 
-type BoostWatcher struct {
-	head *boostevent.BoostEvent // Start of the queue (the next item to be processed)
-	tail *boostevent.BoostEvent // End of the queue (where brand new items are added)
+type NimbusWatcher struct {
+	head *nimbusevent.NimbusEvent // Start of the queue (the next item to be processed)
+	tail *nimbusevent.NimbusEvent // End of the queue (where brand new items are added)
 
 	// 🔒 The Lock: Prevents the Watcher and Worker from crashing the app
 	mu sync.RWMutex
 
-	// completed holds Recons whose RunningCPU is finalized, keyed by
+	// completed holds Nimbus resources whose RunningCPU is finalized, keyed by
 	// "<namespace>/<name>". The ksvc watcher reads it to decide whether to
 	// propagate RunningCPU to a newly-created ksvc. Protected by mu.
-	completed map[string]*boostevent.BoostEvent
+	completed map[string]*nimbusevent.NimbusEvent
 }
 
-func (bw *BoostWatcher) Enqueue(newEvent *boostevent.BoostEvent) {
+func (bw *NimbusWatcher) Enqueue(newEvent *nimbusevent.NimbusEvent) {
 	// 1. Lock the queue so the Worker can't pull from it while we are working
 	bw.mu.Lock()
 	defer bw.mu.Unlock()
@@ -39,7 +39,7 @@ func (bw *BoostWatcher) Enqueue(newEvent *boostevent.BoostEvent) {
 // It returns nil if the queue is empty.
 // Dequeue searches the list for a CRD that matches the target's Namespace and Name.
 // It safely severs it from the linked list and returns it.
-func (bw *BoostWatcher) Dequeue(target *boostevent.BoostEvent) *boostevent.BoostEvent {
+func (bw *NimbusWatcher) Dequeue(target *nimbusevent.NimbusEvent) *nimbusevent.NimbusEvent {
 	bw.mu.Lock()
 	defer bw.mu.Unlock()
 
@@ -87,8 +87,8 @@ func (bw *BoostWatcher) Dequeue(target *boostevent.BoostEvent) *boostevent.Boost
 	return nil
 }
 
-func NewBoostWatcher() *BoostWatcher {
-	return &BoostWatcher{
-		completed: make(map[string]*boostevent.BoostEvent),
+func NewNimbusWatcher() *NimbusWatcher {
+	return &NimbusWatcher{
+		completed: make(map[string]*nimbusevent.NimbusEvent),
 	}
 }

@@ -1,16 +1,16 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: recons.lazyken.io
+  name: nimbuses.lazyken.io
 spec:
   group: lazyken.io
   scope: Namespaced
   names:
-    plural: recons
-    singular: recon
-    kind: Recon
+    plural: nimbuses
+    singular: nimbus
+    kind: Nimbus
     shortNames:
-      - rc
+      - nb
   versions:
     - name: v1alpha1
       served: true
@@ -30,8 +30,8 @@ spec:
       schema:
         openAPIV3Schema:
           description: |
-            Recon declares a Knative service whose startup- and running-phase
-            CPU limits should be auto-profiled by the RECON controller using
+            Nimbus declares a Knative service whose startup- and running-phase
+            CPU limits should be auto-profiled by the NIMBUS controller using
             a binary search. Finalized values are written to .status and, once
             present, cause the controller to skip re-probing on subsequent
             restarts or re-applies.
@@ -141,7 +141,7 @@ spec:
                         type: string
                       operator:
                         description: |
-                          Set membership operator. RECON only implements "In"
+                          Set membership operator. NIMBUS only implements "In"
                           today; other values Kubernetes allows (NotIn,
                           Exists, DoesNotExist) will be ignored.
                         type: string

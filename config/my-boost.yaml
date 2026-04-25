@@ -1,5 +1,5 @@
 apiVersion: lazyken.io/v1alpha1
-kind: Recon
+kind: Nimbus
 metadata:
   name: boost-001
   namespace: serverless

@@ -4,22 +4,22 @@ import (
 	"context"
 	"encoding/json"
 
-	"recon/api/logging"
+	"nimbus/api/logging"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// WriteReconStatus persists the finalized startingCpu and runningCpu to the
-// Recon CRD's .status subresource. Once written, a subsequent watch Added
+// WriteNimbusStatus persists the finalized startingCpu and runningCpu to the
+// Nimbus CRD's .status subresource. Once written, a subsequent watch Added
 // event (e.g., after controller restart or CRD re-apply) will see the
 // populated status and skip re-running the binary search.
 //
 // To force a re-search, clear the fields:
 //
-//	kubectl patch recon <name> -n <ns> --subresource=status --type=merge \
+//	kubectl patch nimbus <name> -n <ns> --subresource=status --type=merge \
 //	    -p '{"status":{"startingCpu":"","runningCpu":""}}'
-func WriteReconStatus(ctx context.Context, namespace, name, startingCPU, runningCPU string) error {
+func WriteNimbusStatus(ctx context.Context, namespace, name, startingCPU, runningCPU string) error {
 	payload := map[string]interface{}{
 		"status": map[string]interface{}{
 			"startingCpu": startingCPU,
@@ -31,7 +31,7 @@ func WriteReconStatus(ctx context.Context, namespace, name, startingCPU, running
 		return err
 	}
 
-	_, err = DYNCLIENT.Resource(RECON_GVR).Namespace(namespace).Patch(
+	_, err = DYNCLIENT.Resource(NIMBUS_GVR).Namespace(namespace).Patch(
 		ctx,
 		name,
 		types.MergePatchType,
@@ -40,11 +40,11 @@ func WriteReconStatus(ctx context.Context, namespace, name, startingCPU, running
 		"status", // target the /status subresource
 	)
 	if err != nil {
-		logging.Failure("Failed to write Recon status:", err)
+		logging.Failure("Failed to write Nimbus status:", err)
 		return err
 	}
 
-	logging.Success("Recon status persisted:", namespace+"/"+name,
+	logging.Success("Nimbus status persisted:", namespace+"/"+name,
 		"starting=", startingCPU, "running=", runningCPU)
 	return nil
 }

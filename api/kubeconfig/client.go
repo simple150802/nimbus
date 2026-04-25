@@ -15,10 +15,10 @@ var (
 	// ---------------------------------------------------------
 	// 1. GLOBAL GVR VARIABLES
 	// ---------------------------------------------------------
-	RECON_GVR = schema.GroupVersionResource{
+	NIMBUS_GVR = schema.GroupVersionResource{
 		Group:    "lazyken.io",
 		Version:  "v1alpha1",
-		Resource: "recons",
+		Resource: "nimbuses",
 	}
 
 	STD_GVR = schema.GroupVersionResource{

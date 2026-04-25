@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"recon/api/boostevent"
-	"recon/api/kubeapi"
-	"recon/api/kubeconfig"
-	"recon/api/logging"
+	"nimbus/api/nimbusevent"
+	"nimbus/api/kubeapi"
+	"nimbus/api/kubeconfig"
+	"nimbus/api/logging"
 	"strings"
 	"time"
 
@@ -20,7 +20,7 @@ var (
 	DYNCLIENT = kubeconfig.DYNCLIENT
 	CLIENTSET = kubeconfig.CLIENTSET
 	STD_GVR   = kubeconfig.STD_GVR
-	RECON_GVR = kubeconfig.RECON_GVR
+	NIMBUS_GVR = kubeconfig.NIMBUS_GVR
 )
 
 const (
@@ -66,7 +66,7 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 	}
 }
 
-func buildLabelSelector(ev *boostevent.BoostEvent) string {
+func buildLabelSelector(ev *nimbusevent.NimbusEvent) string {
 	var parts []string
 	for _, expr := range ev.Selector.MatchExpressions {
 		vals := strings.Join(expr.Values, ",")
@@ -83,7 +83,7 @@ func buildLabelSelector(ev *boostevent.BoostEvent) string {
 // gives up so BinarySearch can abort cleanly instead of hanging forever.
 func coldSampleWithStuckRecovery(
 	ctx context.Context,
-	event *boostevent.BoostEvent,
+	event *nimbusevent.NimbusEvent,
 	labelSelector, targetKsvc string,
 	sampleIdx, sampleTotal int,
 ) (time.Duration, error) {
@@ -157,7 +157,7 @@ func waitForScaleToZero(ctx context.Context, phase, namespace, labelSelector str
 	}
 }
 
-func getResptCold(ctx context.Context, event *boostevent.BoostEvent, cpuValue string) (time.Duration, error) {
+func getResptCold(ctx context.Context, event *nimbusevent.NimbusEvent, cpuValue string) (time.Duration, error) {
 	logging.Stage(fmt.Sprintf("[COLD] probe starting — cpu=%s ns=%s", cpuValue, event.Metadata.Namespace))
 	labelSelector := buildLabelSelector(event)
 
@@ -204,7 +204,7 @@ func getResptCold(ctx context.Context, event *boostevent.BoostEvent, cpuValue st
 	return avg, nil
 }
 
-func getResptWarm(ctx context.Context, event *boostevent.BoostEvent, cpuValue string, cpuCold string) (time.Duration, error) {
+func getResptWarm(ctx context.Context, event *nimbusevent.NimbusEvent, cpuValue string, cpuCold string) (time.Duration, error) {
 	logging.Stage(fmt.Sprintf("[WARM] probe starting — cpu=%s cold_boost=%s ns=%s", cpuValue, cpuCold, event.Metadata.Namespace))
 	labelSelector := buildLabelSelector(event)
 
@@ -288,7 +288,7 @@ func getResptWarm(ctx context.Context, event *boostevent.BoostEvent, cpuValue st
 // up in every log line so you can tell at a glance which measurement is
 // in flight. Honors ctx: cancellation aborts both in-flight requests and
 // the inter-retry wait so SIGINT stops the probe immediately.
-func triggerHttp(ctx context.Context, phase string, api_condition boostevent.ApiCondition) (time.Duration, error) {
+func triggerHttp(ctx context.Context, phase string, api_condition nimbusevent.ApiCondition) (time.Duration, error) {
 	targetURL := api_condition.Url
 	expectedResponse := api_condition.Response
 	logging.Normal(fmt.Sprintf("[%s] curl GET %s (expect body~%q)", phase, targetURL, expectedResponse))

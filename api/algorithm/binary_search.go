@@ -4,12 +4,12 @@ import (
 	"fmt"
 
 	"context"
-	"recon/api/boostevent"
-	"recon/api/kubeapi"
-	"recon/api/logging"
+	"nimbus/api/nimbusevent"
+	"nimbus/api/kubeapi"
+	"nimbus/api/logging"
 )
 
-func BinarySearch(ctx context.Context, current *boostevent.BoostEvent) (string, error) {
+func BinarySearch(ctx context.Context, current *nimbusevent.NimbusEvent) (string, error) {
 	ns := current.Metadata.Namespace
 	ksvc := current.Selector.MatchExpressions[0].Values[0]
 
@@ -39,7 +39,7 @@ func BinarySearch(ctx context.Context, current *boostevent.BoostEvent) (string, 
 	return current.High, nil
 }
 
-func binarySearchForRunningPhase(ctx context.Context, current *boostevent.BoostEvent) (string, error) {
+func binarySearchForRunningPhase(ctx context.Context, current *nimbusevent.NimbusEvent) (string, error) {
 	// NOTE: Resource_limit of pod during starting phase must be higher than in running phase
 	// If not, an err will occur (Fix in future), currently just pray for err not occur ^^
 	current.Low = current.Spec.ResourcePolicy.ContainerPolicies[0].ResourceRange.Limits.Min
@@ -100,7 +100,7 @@ func binarySearchForRunningPhase(ctx context.Context, current *boostevent.BoostE
 	}
 }
 
-func binarySearchForStartingPhase(ctx context.Context, current *boostevent.BoostEvent) (string, error) {
+func binarySearchForStartingPhase(ctx context.Context, current *nimbusevent.NimbusEvent) (string, error) {
 	current.Low = current.Spec.ResourcePolicy.ContainerPolicies[0].ResourceRange.Limits.Min
 	current.High = current.Spec.ResourcePolicy.ContainerPolicies[0].ResourceRange.Limits.Max
 

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"recon/api/logging"
+	"nimbus/api/logging"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

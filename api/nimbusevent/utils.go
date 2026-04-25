@@ -1,12 +1,12 @@
-package boostevent
+package nimbusevent
 
 import (
-	"recon/api/kubeconfig"
+	"nimbus/api/kubeconfig"
 )
 
 var (
 	DYNCLIENT = kubeconfig.DYNCLIENT
 	CLIENTSET = kubeconfig.CLIENTSET
 	STD_GVR   = kubeconfig.STD_GVR
-	RECON_GVR = kubeconfig.RECON_GVR
+	NIMBUS_GVR = kubeconfig.NIMBUS_GVR
 )
