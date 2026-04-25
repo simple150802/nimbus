@@ -19,7 +19,7 @@ import (
 // PatchResourceLimits is an idempotent JSON-patch replace, so re-applying
 // it to ksvcs that RunWorker already patched (e.g. on the initial watch
 // replay at controller startup) is harmless.
-func (bw *NimbusWatcher) StartKsvcWatcher(ctx context.Context) {
+func (nw *NimbusWatcher) StartKsvcWatcher(ctx context.Context) {
 	w, err := DYNCLIENT.Resource(KSVC_GVR).
 		Namespace(metav1.NamespaceAll).
 		Watch(ctx, metav1.ListOptions{})
@@ -47,19 +47,19 @@ func (bw *NimbusWatcher) StartKsvcWatcher(ctx context.Context) {
 			if !ok {
 				continue
 			}
-			bw.maybePatchNewKsvc(ctx, ksvc)
+			nw.maybePatchNewKsvc(ctx, ksvc)
 		}
 	}
 }
 
-func (bw *NimbusWatcher) maybePatchNewKsvc(ctx context.Context, ksvc *unstructured.Unstructured) {
+func (nw *NimbusWatcher) maybePatchNewKsvc(ctx context.Context, ksvc *unstructured.Unstructured) {
 	ns := ksvc.GetNamespace()
 	name := ksvc.GetName()
 
-	bw.mu.RLock()
-	defer bw.mu.RUnlock()
+	nw.mu.RLock()
+	defer nw.mu.RUnlock()
 
-	for _, nimbus := range bw.completed {
+	for _, nimbus := range nw.completed {
 		if nimbus.Metadata.Namespace != ns {
 			continue
 		}

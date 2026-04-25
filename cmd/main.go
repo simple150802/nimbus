@@ -15,11 +15,11 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	bw := watcher.NewNimbusWatcher()
+	nw := watcher.NewNimbusWatcher()
 
-	go bw.StartWatcher(ctx)     // Nimbus CRD producer
-	go bw.StartKsvcWatcher(ctx) // ksvc Added propagation
-	bw.RunWorker(ctx)           // consumer — blocks until ctx is cancelled
+	go nw.StartWatcher(ctx)     // Nimbus CRD producer
+	go nw.StartKsvcWatcher(ctx) // ksvc Added propagation
+	nw.RunWorker(ctx)           // consumer — blocks until ctx is cancelled
 
 	logging.Stage("Shutdown complete.")
 }

@@ -2,6 +2,7 @@ package watcher
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -10,13 +11,16 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 
 	"nimbus/api/algorithm"
-	"nimbus/api/nimbusevent"
 	"nimbus/api/kubeapi"
 	"nimbus/api/logging"
+	"nimbus/api/nimbusevent"
 )
 
-// 2. The Producer
-func (bw *NimbusWatcher) StartWatcher(ctx context.Context) {
+const idleSleep = 2 * time.Second
+
+// StartWatcher is the producer: watches Nimbus CRs cluster-wide and pushes
+// Added/Deleted events into the worker queue. Blocks until ctx is cancelled.
+func (nw *NimbusWatcher) StartWatcher(ctx context.Context) {
 	w, err := DYNCLIENT.Resource(NIMBUS_GVR).
 		Namespace(metav1.NamespaceAll).
 		Watch(ctx, metav1.ListOptions{})
@@ -48,16 +52,18 @@ func (bw *NimbusWatcher) StartWatcher(ctx context.Context) {
 			}
 			switch event.Type {
 			case watch.Added:
-				bw.Enqueue(&payload)
+				nw.Enqueue(&payload)
 			case watch.Deleted:
-				bw.Dequeue(&payload)
+				nw.Dequeue(&payload)
 			}
 		}
 	}
 }
 
-// 3. The Consumer
-func (bw *NimbusWatcher) RunWorker(ctx context.Context) {
+// RunWorker is the consumer: drains the queue head one Nimbus at a time,
+// runs (or skips) the binary search, applies the result, and dequeues.
+// Blocks until ctx is cancelled.
+func (nw *NimbusWatcher) RunWorker(ctx context.Context) {
 	logging.Stage("Worker started: Direct linked-list monitoring with RLock...")
 
 	// emptyLogged stops the "List is empty, waiting..." line from spamming
@@ -72,21 +78,30 @@ func (bw *NimbusWatcher) RunWorker(ctx context.Context) {
 		default:
 		}
 
-		bw.mu.RLock()
-		current := bw.head
-		bw.mu.RUnlock()
+		nw.mu.RLock()
+		current := nw.head
+		nw.mu.RUnlock()
 
 		if current == nil {
 			if !emptyLogged {
 				logging.Normal("List is empty, waiting...")
 				emptyLogged = true
 			}
-			if !sleepOrDone(ctx, 2*time.Second) {
+			if !sleepOrDone(ctx, idleSleep) {
 				return
 			}
 			continue
 		}
 		emptyLogged = false
+
+		// Defensive — the CRD schema enforces minItems: 1 on both, so this
+		// only fires for objects that bypassed validation. Drop the offender
+		// rather than panic in `[0]` indexing downstream.
+		if err := validateNimbus(current); err != nil {
+			logging.Failure("Dropping malformed Nimbus from queue:", err)
+			nw.Dequeue(current)
+			continue
+		}
 
 		// Fast path: if the Nimbus's .status already carries finalized CPU
 		// values, skip the binary search entirely. This avoids re-probing on
@@ -107,10 +122,10 @@ func (bw *NimbusWatcher) RunWorker(ctx context.Context) {
 			// target, every getResptCold/Warm would fail, and we'd persist
 			// garbage CPU values to status. Leave the Nimbus in the queue
 			// so the next tick retries once the user applies the ksvc.
-			if missing := bw.missingTargetKsvcs(ctx, current); len(missing) > 0 {
+			if missing := nw.missingTargetKsvcs(ctx, current); len(missing) > 0 {
 				logging.Warning("Waiting for target ksvc(s) to appear in namespace",
 					current.Metadata.Namespace, missing)
-				if !sleepOrDone(ctx, 2*time.Second) {
+				if !sleepOrDone(ctx, idleSleep) {
 					return
 				}
 				continue
@@ -119,7 +134,7 @@ func (bw *NimbusWatcher) RunWorker(ctx context.Context) {
 			logging.Stage("STEP PROCESSING:", current.Metadata.Namespace, current.Metadata.Name)
 			if _, err := algorithm.BinarySearch(ctx, current); err != nil {
 				logging.Failure("BinarySearch aborted — leaving Nimbus in queue to retry:", err)
-				if !sleepOrDone(ctx, 2*time.Second) {
+				if !sleepOrDone(ctx, idleSleep) {
 					return
 				}
 				continue
@@ -134,8 +149,8 @@ func (bw *NimbusWatcher) RunWorker(ctx context.Context) {
 			}
 		}
 
-		// Apply (idempotent). Both code paths converge here so ksvcs get
-		// the StartupCPUBoost CR and the running-phase CPU limit.
+		// Apply paths are idempotent. Errors are logged inside each helper;
+		// surfacing them here would just duplicate log lines.
 		kubeapi.CreateStartupCPUBoost(ctx, current, current.StartingCPU)
 		for _, ksvc := range current.Selector.MatchExpressions[0].Values {
 			kubeapi.PatchResourceLimits(ctx, current.Metadata.Namespace, ksvc, current.RunningCPU)
@@ -143,23 +158,42 @@ func (bw *NimbusWatcher) RunWorker(ctx context.Context) {
 
 		// Register so the ksvc watcher can propagate RunningCPU to future
 		// ksvcs matching this Nimbus's selector.
-		bw.mu.Lock()
+		nw.mu.Lock()
 		key := current.Metadata.Namespace + "/" + current.Metadata.Name
-		bw.completed[key] = current
-		bw.mu.Unlock()
+		nw.completed[key] = current
+		nw.mu.Unlock()
 
-		// Remove this Nimbus from the queue — it's done. Without this the
-		// worker would spin on the same saturated head forever.
-		bw.Dequeue(current)
+		// Without Dequeue here the worker would spin on the same saturated
+		// head forever.
+		nw.Dequeue(current)
 
-		if !sleepOrDone(ctx, 2*time.Second) {
+		if !sleepOrDone(ctx, idleSleep) {
 			return
 		}
 	}
 }
 
-// sleepOrDone waits for d or for ctx to be cancelled, whichever comes first.
-// Returns false if ctx was cancelled.
+// validateNimbus rejects events that would panic the [0]-indexed code
+// downstream. The CRD schema already enforces these via `minItems: 1`,
+// so this is belt-and-suspenders for objects that somehow bypass it.
+func validateNimbus(ev *nimbusevent.NimbusEvent) error {
+	if len(ev.Selector.MatchExpressions) == 0 {
+		return fmt.Errorf("%s/%s: selector.matchExpressions is empty",
+			ev.Metadata.Namespace, ev.Metadata.Name)
+	}
+	if len(ev.Selector.MatchExpressions[0].Values) == 0 {
+		return fmt.Errorf("%s/%s: selector.matchExpressions[0].values is empty",
+			ev.Metadata.Namespace, ev.Metadata.Name)
+	}
+	if len(ev.Spec.ResourcePolicy.ContainerPolicies) == 0 {
+		return fmt.Errorf("%s/%s: spec.resourcePolicy.containerPolicies is empty",
+			ev.Metadata.Namespace, ev.Metadata.Name)
+	}
+	return nil
+}
+
+// sleepOrDone waits for d or for ctx cancellation, whichever comes first.
+// Returns false on cancellation.
 func sleepOrDone(ctx context.Context, d time.Duration) bool {
 	select {
 	case <-ctx.Done():
@@ -169,12 +203,11 @@ func sleepOrDone(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// missingTargetKsvcs returns the subset of the Nimbus's selector values whose
-// Knative service does not currently exist in the Nimbus's namespace. An empty
-// result means all targets are present and the binary search can proceed.
-// Any error from the API (NotFound, forbidden, transient) is treated as
-// "missing" — the worker will retry on the next tick.
-func (bw *NimbusWatcher) missingTargetKsvcs(ctx context.Context, ev *nimbusevent.NimbusEvent) []string {
+// missingTargetKsvcs returns the subset of the Nimbus's selector values
+// whose Knative service does not currently exist in the namespace.
+// Any API error (NotFound, forbidden, transient) is treated as "missing"
+// — the worker will retry on the next tick.
+func (nw *NimbusWatcher) missingTargetKsvcs(ctx context.Context, ev *nimbusevent.NimbusEvent) []string {
 	if len(ev.Selector.MatchExpressions) == 0 {
 		return nil
 	}

@@ -1,94 +1,93 @@
 package watcher
 
 import (
-	"nimbus/api/nimbusevent"
 	"sync"
+
+	"nimbus/api/nimbusevent"
 )
 
+// NimbusWatcher owns the in-memory queue of pending Nimbus events plus
+// the map of completed ones used by the ksvc watcher to propagate
+// RunningCPU. The same RWMutex guards the queue's head/tail pointers and
+// the completed map.
 type NimbusWatcher struct {
-	head *nimbusevent.NimbusEvent // Start of the queue (the next item to be processed)
-	tail *nimbusevent.NimbusEvent // End of the queue (where brand new items are added)
+	head *nimbusevent.NimbusEvent
+	tail *nimbusevent.NimbusEvent
 
-	// 🔒 The Lock: Prevents the Watcher and Worker from crashing the app
 	mu sync.RWMutex
 
-	// completed holds Nimbus resources whose RunningCPU is finalized, keyed by
-	// "<namespace>/<name>". The ksvc watcher reads it to decide whether to
-	// propagate RunningCPU to a newly-created ksvc. Protected by mu.
+	// completed: keyed by "<namespace>/<name>". Read by the ksvc watcher
+	// when deciding whether to propagate RunningCPU to a newly-created
+	// ksvc. Protected by mu.
 	completed map[string]*nimbusevent.NimbusEvent
-}
-
-func (bw *NimbusWatcher) Enqueue(newEvent *nimbusevent.NimbusEvent) {
-	// 1. Lock the queue so the Worker can't pull from it while we are working
-	bw.mu.Lock()
-	defer bw.mu.Unlock()
-
-	// 2. If the queue is totally empty, this new event is BOTH the head and the tail
-	if bw.head == nil {
-		bw.head = newEvent
-		bw.tail = newEvent
-		return
-	}
-
-	// 3. If the queue has items, tell the current tail to point to this new event...
-	bw.tail.Next = newEvent
-	bw.tail = newEvent
-}
-
-// Dequeue safely removes and returns the event at the front of the line.
-// It returns nil if the queue is empty.
-// Dequeue searches the list for a CRD that matches the target's Namespace and Name.
-// It safely severs it from the linked list and returns it.
-func (bw *NimbusWatcher) Dequeue(target *nimbusevent.NimbusEvent) *nimbusevent.NimbusEvent {
-	bw.mu.Lock()
-	defer bw.mu.Unlock()
-
-	// 1. If the list is empty, there is nothing to remove.
-	if bw.head == nil {
-		return nil
-	}
-
-	if bw.head.Metadata.Namespace == target.Metadata.Namespace && bw.head.Metadata.Name == target.Metadata.Name {
-		item := bw.head
-		bw.head = bw.head.Next // Move the head to the next person in line
-
-		// If the list is now empty, reset the tail too
-		if bw.head == nil {
-			bw.tail = nil
-		}
-
-		item.Next = nil // Sever connection for memory safety
-		return item
-	}
-
-	current := bw.head
-
-	for current.Next != nil {
-		// Look ahead to see if the NEXT node is our target
-		if current.Next.Metadata.Namespace == target.Metadata.Namespace && current.Next.Metadata.Name == target.Metadata.Name {
-			item := current.Next
-
-			// 🪄 Stitch the chain together, bypassing the target item!
-			current.Next = item.Next
-
-			// If the item we just removed was the tail, the current node becomes the new tail
-			if item == bw.tail {
-				bw.tail = current
-			}
-
-			item.Next = nil // Sever connection
-			return item
-		}
-
-		current = current.Next
-	}
-
-	// 3. Not found in the list
-	return nil
 }
 
 func NewNimbusWatcher() *NimbusWatcher {
 	return &NimbusWatcher{
 		completed: make(map[string]*nimbusevent.NimbusEvent),
 	}
+}
+
+// Enqueue appends a Nimbus event to the tail of the queue. Idempotent on
+// (namespace, name) — a duplicate from a watch resync is silently
+// dropped so the worker doesn't process the same Nimbus twice.
+func (nw *NimbusWatcher) Enqueue(newEvent *nimbusevent.NimbusEvent) {
+	nw.mu.Lock()
+	defer nw.mu.Unlock()
+
+	for cur := nw.head; cur != nil; cur = cur.Next {
+		if matches(cur, newEvent) {
+			return
+		}
+	}
+
+	if nw.head == nil {
+		nw.head = newEvent
+		nw.tail = newEvent
+		return
+	}
+	nw.tail.Next = newEvent
+	nw.tail = newEvent
+}
+
+// Dequeue does a linear search for the entry whose (namespace, name)
+// matches target, severs it from the linked list, and returns it.
+// Returns nil if no match. Despite the name, this is not a FIFO pop —
+// it's used both for "this Nimbus was deleted, drop it from the queue"
+// and "this Nimbus finished processing, remove it".
+func (nw *NimbusWatcher) Dequeue(target *nimbusevent.NimbusEvent) *nimbusevent.NimbusEvent {
+	nw.mu.Lock()
+	defer nw.mu.Unlock()
+
+	if nw.head == nil {
+		return nil
+	}
+
+	if matches(nw.head, target) {
+		item := nw.head
+		nw.head = nw.head.Next
+		if nw.head == nil {
+			nw.tail = nil
+		}
+		item.Next = nil
+		return item
+	}
+
+	for cur := nw.head; cur.Next != nil; cur = cur.Next {
+		if matches(cur.Next, target) {
+			item := cur.Next
+			cur.Next = item.Next
+			if item == nw.tail {
+				nw.tail = cur
+			}
+			item.Next = nil
+			return item
+		}
+	}
+	return nil
+}
+
+func matches(a, b *nimbusevent.NimbusEvent) bool {
+	return a.Metadata.Namespace == b.Metadata.Namespace &&
+		a.Metadata.Name == b.Metadata.Name
 }

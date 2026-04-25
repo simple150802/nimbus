@@ -1,12 +1,31 @@
 package algorithm
 
 import (
-	"fmt"
-
 	"context"
-	"nimbus/api/nimbusevent"
+	"fmt"
+	"time"
+
 	"nimbus/api/kubeapi"
 	"nimbus/api/logging"
+	"nimbus/api/nimbusevent"
+)
+
+const (
+	// runningPhaseLowOffsetMilli is the milli-CPU offset applied to the
+	// spec's min when seeding the running-phase search lower bound. The
+	// running-phase optimum is allowed to dip below the starting-phase
+	// minimum, so we extend the range slightly downward.
+	runningPhaseLowOffsetMilli = -50
+
+	// convergenceThresholdMilli stops the binary search when high - low
+	// drops below this threshold (milli-CPU). 100m corresponds to roughly
+	// the granularity Kubernetes' scheduler can act on.
+	convergenceThresholdMilli = 100
+
+	// responseTimeImprovementGate is the relative drop in measured
+	// response time needed to justify moving the lower bound up rather
+	// than narrowing toward the upper bound. 0.10 == 10%.
+	responseTimeImprovementGate = 0.10
 )
 
 func BinarySearch(ctx context.Context, current *nimbusevent.NimbusEvent) (string, error) {
@@ -39,34 +58,38 @@ func BinarySearch(ctx context.Context, current *nimbusevent.NimbusEvent) (string
 	return current.High, nil
 }
 
-func binarySearchForRunningPhase(ctx context.Context, current *nimbusevent.NimbusEvent) (string, error) {
-	// NOTE: Resource_limit of pod during starting phase must be higher than in running phase
-	// If not, an err will occur (Fix in future), currently just pray for err not occur ^^
-	current.Low = current.Spec.ResourcePolicy.ContainerPolicies[0].ResourceRange.Limits.Min
-	runningLow, err := kubeapi.AdjustCPUMilli(current.Low, -50)
-	if err != nil {
-		return "", err
-	}
-	current.Low = runningLow
-	current.High = current.StartingCPU
+// probeFn is a phase-agnostic measurement primitive. The starting phase
+// passes a closure around getResptCold; the running phase passes one
+// around getResptWarm. Both return a duration to compare against the
+// previous probe.
+type probeFn func(ctx context.Context, current *nimbusevent.NimbusEvent, cpu string) (time.Duration, error)
 
-	rtLow, err := getResptWarm(ctx, current, current.Low, current.High)
+// runBinarySearch is the shared convergence loop used by both phases.
+// It walks the [low, high] window, asking probe() for the response time
+// at low, mid, and high, and chooses which bound to move based on the
+// 10% improvement gate. Stops when high - low <= convergenceThresholdMilli.
+// On success it writes setResult(current.High) and returns current.High.
+func runBinarySearch(
+	ctx context.Context,
+	current *nimbusevent.NimbusEvent,
+	probe probeFn,
+	setResult func(cpu string),
+) (string, error) {
+	rtLow, err := probe(ctx, current, current.Low)
 	if err != nil {
 		return "", err
 	}
 
 	for {
-		shouldContinue, err := kubeapi.IsDiffGreaterThresh(current.Low, current.High, 100)
+		shouldContinue, err := kubeapi.IsDiffGreaterThresh(current.Low, current.High, convergenceThresholdMilli)
 		if err != nil {
 			logging.Failure("Error calculating threshold:", err)
 			return "", err
 		}
-
 		if !shouldContinue {
 			logging.Success(fmt.Sprintf("Binary Search Complete! The optimal CPU limit is: %s", current.High))
-			current.RunningSaturated = true
-			current.RunningCPU = current.High
-			return current.RunningCPU, nil
+			setResult(current.High)
+			return current.High, nil
 		}
 
 		midCPU, err := kubeapi.CalculateAverageCPU(current.Low, current.High)
@@ -74,21 +97,19 @@ func binarySearchForRunningPhase(ctx context.Context, current *nimbusevent.Nimbu
 			logging.Failure("Invalid CPU units:", err)
 			return "", err
 		}
-
 		logging.Info("Checking at", midCPU, "CPU ...")
 
-		rtMid, err := getResptWarm(ctx, current, midCPU, current.High)
+		rtMid, err := probe(ctx, current, midCPU)
 		if err != nil {
 			return "", err
 		}
 
-		// If response time improved by more than 10%, move the lower bound up
-		if float64(rtLow-rtMid)/float64(rtLow) > 0.1 {
-			rtHigh, err := getResptWarm(ctx, current, current.High, current.High)
+		if float64(rtLow-rtMid)/float64(rtLow) > responseTimeImprovementGate {
+			rtHigh, err := probe(ctx, current, current.High)
 			if err != nil {
 				return "", err
 			}
-			if float64(rtMid-rtHigh)/float64(rtMid) > 0.1 {
+			if float64(rtMid-rtHigh)/float64(rtMid) > responseTimeImprovementGate {
 				current.Low = midCPU
 				rtLow = rtMid
 			} else {
@@ -104,52 +125,31 @@ func binarySearchForStartingPhase(ctx context.Context, current *nimbusevent.Nimb
 	current.Low = current.Spec.ResourcePolicy.ContainerPolicies[0].ResourceRange.Limits.Min
 	current.High = current.Spec.ResourcePolicy.ContainerPolicies[0].ResourceRange.Limits.Max
 
-	rtLow, err := getResptCold(ctx, current, current.Low)
+	probe := func(ctx context.Context, ev *nimbusevent.NimbusEvent, cpu string) (time.Duration, error) {
+		return getResptCold(ctx, ev, cpu)
+	}
+	setResult := func(cpu string) {
+		current.StartingSaturated = true
+		current.StartingCPU = cpu
+	}
+	return runBinarySearch(ctx, current, probe, setResult)
+}
+
+func binarySearchForRunningPhase(ctx context.Context, current *nimbusevent.NimbusEvent) (string, error) {
+	current.Low = current.Spec.ResourcePolicy.ContainerPolicies[0].ResourceRange.Limits.Min
+	runningLow, err := kubeapi.AdjustCPUMilli(current.Low, runningPhaseLowOffsetMilli)
 	if err != nil {
 		return "", err
 	}
+	current.Low = runningLow
+	current.High = current.StartingCPU
 
-	for {
-		shouldContinue, err := kubeapi.IsDiffGreaterThresh(current.Low, current.High, 100)
-		if err != nil {
-			logging.Failure("Error calculating threshold:", err)
-			return "", err
-		}
-
-		if !shouldContinue {
-			logging.Success(fmt.Sprintf("Binary Search Complete! The optimal CPU limit is: %s", current.High))
-			current.StartingSaturated = true
-			current.StartingCPU = current.High
-			return current.StartingCPU, nil
-		}
-
-		midCPU, err := kubeapi.CalculateAverageCPU(current.Low, current.High)
-		if err != nil {
-			logging.Failure("Invalid CPU units:", err)
-			return "", err
-		}
-
-		logging.Info("Checking at", midCPU, "CPU ...")
-
-		rtMid, err := getResptCold(ctx, current, midCPU)
-		if err != nil {
-			return "", err
-		}
-
-		// If response time improved by more than 10%, move the lower bound up
-		if float64(rtLow-rtMid)/float64(rtLow) > 0.1 {
-			rtHigh, err := getResptCold(ctx, current, current.High)
-			if err != nil {
-				return "", err
-			}
-			if float64(rtMid-rtHigh)/float64(rtMid) > 0.1 {
-				current.Low = midCPU
-				rtLow = rtMid
-			} else {
-				current.High = midCPU
-			}
-		} else {
-			current.High = midCPU
-		}
+	probe := func(ctx context.Context, ev *nimbusevent.NimbusEvent, cpu string) (time.Duration, error) {
+		return getResptWarm(ctx, ev, cpu, current.High)
 	}
+	setResult := func(cpu string) {
+		current.RunningSaturated = true
+		current.RunningCPU = cpu
+	}
+	return runBinarySearch(ctx, current, probe, setResult)
 }
