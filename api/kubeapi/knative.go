@@ -153,31 +153,34 @@ func UnsetMaxScale(ctx context.Context, namespace, ksvcName string) error {
 	return err
 }
 
-// DeleteKsvcPods force-deletes every pod matching the selector in namespace.
-// Used between cold probes so the next sample can't be served by a lingering
-// pod whose CPU limit was injected under a prior StartupCPUBoost — the
-// upstream boost webhook only fires at pod creation, so orphaned pods keep
-// their old limits forever until they're scaled down or deleted.
-func DeleteKsvcPods(ctx context.Context, namespace, labelSelector string) error {
+// DeleteKsvcPods force-deletes every pod matching the selector in namespace
+// and returns the names of pods that were actually deleted. Used between
+// cold probes so the next sample can't be served by a lingering pod whose
+// CPU limit was injected under a prior StartupCPUBoost — the upstream boost
+// webhook only fires at pod creation, so orphaned pods keep their old
+// limits forever until they're scaled down or deleted. The caller logs the
+// deletions with phase + sample context.
+func DeleteKsvcPods(ctx context.Context, namespace, labelSelector string) ([]string, error) {
 	pods, err := CLIENTSET.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: labelSelector,
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(pods.Items) == 0 {
-		return nil
+		return nil, nil
 	}
 	zero := int64(0)
+	var deleted []string
 	for _, p := range pods.Items {
 		err := CLIENTSET.CoreV1().Pods(namespace).Delete(ctx, p.Name, metav1.DeleteOptions{
 			GracePeriodSeconds: &zero,
 		})
 		if err != nil && !apierrors.IsNotFound(err) {
 			logging.Failure(fmt.Sprintf("[set] failed to delete pod %s/%s: %v", namespace, p.Name, err))
-			return err
+			return deleted, err
 		}
-		logging.Info(fmt.Sprintf("[set] deleted leftover pod %s/%s", namespace, p.Name))
+		deleted = append(deleted, p.Name)
 	}
-	return nil
+	return deleted, nil
 }

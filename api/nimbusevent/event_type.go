@@ -23,6 +23,12 @@ type NimbusEvent struct {
 
 	RunningSaturated bool   `json:"-"`
 	RunningCPU       string `json:"-"`
+
+	// CandidateNodes is the list of cluster nodes the target ksvc is
+	// eligible to run on, given its nodeSelector + nodeAffinity. Populated
+	// once when the event enters the worker, sorted lexicographically.
+	// Empty until populated; nil after a discovery error.
+	CandidateNodes []string `json:"-"`
 }
 
 // NimbusStatus reflects the Nimbus CRD's .status subresource. Field names must

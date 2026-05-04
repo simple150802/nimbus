@@ -89,8 +89,13 @@ func coldSampleWithStuckRecovery(
 		// Force-delete any leftover pod from a previous probe — the upstream
 		// boost webhook only fires on creation, so a pod carrying an old CPU
 		// limit cannot be re-mutated, only replaced.
-		if err := kubeapi.DeleteKsvcPods(ctx, event.Metadata.Namespace, labelSelector); err != nil {
+		deleted, err := kubeapi.DeleteKsvcPods(ctx, event.Metadata.Namespace, labelSelector)
+		if err != nil {
 			return 0, err
+		}
+		for _, name := range deleted {
+			logging.Info(fmt.Sprintf("[COLD] reset pod %s/%s before sample %d/%d",
+				event.Metadata.Namespace, name, sampleIdx, sampleTotal))
 		}
 		if err := waitForScaleToZero(ctx, phaseCold, event.Metadata.Namespace, labelSelector); err != nil {
 			return 0, err

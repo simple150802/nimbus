@@ -131,6 +131,18 @@ func (nw *NimbusWatcher) RunWorker(ctx context.Context) {
 				continue
 			}
 
+			// Discover which nodes the ksvc can run on. Read-only; populates
+			// current.CandidateNodes. The list is logged but not yet used
+			// downstream — Phase 2 of the multi-node refactor will loop the
+			// binary search over each candidate node. See multiple_nodes.md.
+			if err := nw.discoverCandidateNodes(ctx, current); err != nil {
+				logging.Warning("[nodes] discovery failed — retrying on next tick:", err)
+				if !sleepOrDone(ctx, idleSleep) {
+					return
+				}
+				continue
+			}
+
 			logging.Stage("STEP PROCESSING:", current.Metadata.Namespace, current.Metadata.Name)
 			if _, err := algorithm.BinarySearch(ctx, current); err != nil {
 				logging.Failure("BinarySearch aborted — leaving Nimbus in queue to retry:", err)
