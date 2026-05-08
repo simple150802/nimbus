@@ -13,8 +13,12 @@ spec:
     containerPolicies:
     - containerName: user-container
       fixedResources:
-        requests: "200m"
-        limits: "500m"
+        - node: node1
+          requests: "200m"
+          limits: "500m"
+        - node: node2
+          requests: "200m"
+          limits: "500m"
   durationPolicy:
     apiCondition:
       url: "http://measure-yolo.serverless.svc.cluster.local/status"

@@ -3,27 +3,39 @@ package kubeapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"nimbus/api/logging"
+	"nimbus/api/nimbusevent"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// WriteNimbusStatus persists the finalized startingCpu and runningCpu to the
-// Nimbus CRD's .status subresource. Once written, a subsequent watch Added
-// event (e.g., after controller restart or CRD re-apply) will see the
-// populated status and skip re-running the binary search.
+// WriteNimbusStatus persists the per-node converged CPU values to the Nimbus
+// CRD's .status.perNode map. Once every candidate node has both startingCpu
+// and runningCpu populated, a subsequent watch Added event (controller
+// restart, re-apply) takes the worker's fast path instead of re-probing.
 //
-// To force a re-search, clear the fields:
+// To force a re-search, clear the map:
 //
 //	kubectl patch nimbus <name> -n <ns> --subresource=status --type=merge \
-//	    -p '{"status":{"startingCpu":"","runningCpu":""}}'
-func WriteNimbusStatus(ctx context.Context, namespace, name, startingCPU, runningCPU string) error {
+//	    -p '{"status":{"perNode":null}}'
+func WriteNimbusStatus(ctx context.Context, namespace, name string, perNode map[string]*nimbusevent.NodeResult) error {
+	statusMap := make(map[string]map[string]string, len(perNode))
+	for node, r := range perNode {
+		if r == nil {
+			continue
+		}
+		statusMap[node] = map[string]string{
+			"startingCpu": r.StartingCpu,
+			"runningCpu":  r.RunningCpu,
+		}
+	}
+
 	payload := map[string]interface{}{
 		"status": map[string]interface{}{
-			"startingCpu": startingCPU,
-			"runningCpu":  runningCPU,
+			"perNode": statusMap,
 		},
 	}
 	payloadBytes, err := json.Marshal(payload)
@@ -37,14 +49,14 @@ func WriteNimbusStatus(ctx context.Context, namespace, name, startingCPU, runnin
 		types.MergePatchType,
 		payloadBytes,
 		metav1.PatchOptions{},
-		"status", // target the /status subresource
+		"status",
 	)
 	if err != nil {
 		logging.Failure("Failed to write Nimbus status:", err)
 		return err
 	}
 
-	logging.Success("Nimbus status persisted:", namespace+"/"+name,
-		"starting=", startingCPU, "running=", runningCPU)
+	logging.Success(fmt.Sprintf("Nimbus status persisted: %s/%s perNode=%d entries",
+		namespace, name, len(statusMap)))
 	return nil
 }

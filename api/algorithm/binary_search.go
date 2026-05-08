@@ -28,9 +28,21 @@ const (
 	responseTimeImprovementGate = 0.10
 )
 
-func BinarySearch(ctx context.Context, current *nimbusevent.NimbusEvent) (string, error) {
+// BinarySearch runs both phases of the CPU search for a single candidate
+// node. The caller is expected to have pinned the ksvc to that node before
+// calling (so every probed pod lands there) and to unpin afterwards.
+// Convergence values are written into current.PerNodeResults[node] — the
+// entry is created if missing.
+func BinarySearch(ctx context.Context, current *nimbusevent.NimbusEvent, node string) (string, error) {
 	ns := current.Metadata.Namespace
 	ksvc := current.Selector.MatchExpressions[0].Values[0]
+
+	if current.PerNodeResults == nil {
+		current.PerNodeResults = make(map[string]*nimbusevent.NodeResult)
+	}
+	if current.PerNodeResults[node] == nil {
+		current.PerNodeResults[node] = &nimbusevent.NodeResult{}
+	}
 
 	// Pin the ksvc to one pod for the whole search — both the starting and
 	// running phases need deterministic measurement, so neither should share
@@ -45,15 +57,16 @@ func BinarySearch(ctx context.Context, current *nimbusevent.NimbusEvent) (string
 		}
 	}()
 
-	if _, err := binarySearchForStartingPhase(ctx, current); err != nil {
+	if _, err := binarySearchForStartingPhase(ctx, current, node); err != nil {
 		return "", fmt.Errorf("starting phase aborted: %w", err)
 	}
-	if _, err := binarySearchForRunningPhase(ctx, current); err != nil {
+	if _, err := binarySearchForRunningPhase(ctx, current, node); err != nil {
 		return "", fmt.Errorf("running phase aborted: %w", err)
 	}
 
-	logging.Info("CPU for starting phase: ", current.StartingCPU)
-	logging.Info("CPU for running phase: ", current.RunningCPU)
+	result := current.PerNodeResults[node]
+	logging.Info(fmt.Sprintf("[node=%s] starting CPU: %s | running CPU: %s",
+		node, result.StartingCpu, result.RunningCpu))
 
 	return current.High, nil
 }
@@ -121,7 +134,7 @@ func runBinarySearch(
 	}
 }
 
-func binarySearchForStartingPhase(ctx context.Context, current *nimbusevent.NimbusEvent) (string, error) {
+func binarySearchForStartingPhase(ctx context.Context, current *nimbusevent.NimbusEvent, node string) (string, error) {
 	current.Low = current.Spec.ResourcePolicy.ContainerPolicies[0].ResourceRange.Limits.Min
 	current.High = current.Spec.ResourcePolicy.ContainerPolicies[0].ResourceRange.Limits.Max
 
@@ -129,27 +142,27 @@ func binarySearchForStartingPhase(ctx context.Context, current *nimbusevent.Nimb
 		return getResptCold(ctx, ev, cpu)
 	}
 	setResult := func(cpu string) {
-		current.StartingSaturated = true
-		current.StartingCPU = cpu
+		current.PerNodeResults[node].StartingCpu = cpu
+		current.PerNodeResults[node].StartingSaturated = true
 	}
 	return runBinarySearch(ctx, current, probe, setResult)
 }
 
-func binarySearchForRunningPhase(ctx context.Context, current *nimbusevent.NimbusEvent) (string, error) {
+func binarySearchForRunningPhase(ctx context.Context, current *nimbusevent.NimbusEvent, node string) (string, error) {
 	current.Low = current.Spec.ResourcePolicy.ContainerPolicies[0].ResourceRange.Limits.Min
 	runningLow, err := kubeapi.AdjustCPUMilli(current.Low, runningPhaseLowOffsetMilli)
 	if err != nil {
 		return "", err
 	}
 	current.Low = runningLow
-	current.High = current.StartingCPU
+	current.High = current.PerNodeResults[node].StartingCpu
 
 	probe := func(ctx context.Context, ev *nimbusevent.NimbusEvent, cpu string) (time.Duration, error) {
 		return getResptWarm(ctx, ev, cpu, current.High)
 	}
 	setResult := func(cpu string) {
-		current.RunningSaturated = true
-		current.RunningCPU = cpu
+		current.PerNodeResults[node].RunningCpu = cpu
+		current.PerNodeResults[node].RunningSaturated = true
 	}
 	return runBinarySearch(ctx, current, probe, setResult)
 }

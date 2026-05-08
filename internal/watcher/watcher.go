@@ -10,7 +10,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 
-	"nimbus/api/algorithm"
 	"nimbus/api/kubeapi"
 	"nimbus/api/logging"
 	"nimbus/api/nimbusevent"
@@ -103,69 +102,75 @@ func (nw *NimbusWatcher) RunWorker(ctx context.Context) {
 			continue
 		}
 
-		// Fast path: if the Nimbus's .status already carries finalized CPU
-		// values, skip the binary search entirely. This avoids re-probing on
-		// controller restart and, more importantly, prevents the boost
-		// controller's "never lower" semantic from biasing subsequent runs.
-		if current.Status.StartingCpu != "" && current.Status.RunningCpu != "" {
-			logging.Info("Skipping binary search — Nimbus already completed:",
-				current.Metadata.Namespace+"/"+current.Metadata.Name,
-				"starting=", current.Status.StartingCpu,
-				"running=", current.Status.RunningCpu)
-			current.StartingCPU = current.Status.StartingCpu
-			current.RunningCPU = current.Status.RunningCpu
-			current.StartingSaturated = true
-			current.RunningSaturated = true
+		// Precondition: target ksvcs must exist for both the search and the
+		// apply step. Without this the search would crash on a missing
+		// target and we'd persist garbage; even on the fast path we still
+		// need the ksvc present to PatchResourceLimits / CreateStartupCPUBoost.
+		// Leave the Nimbus in the queue so the next tick retries.
+		if missing := nw.missingTargetKsvcs(ctx, current); len(missing) > 0 {
+			logging.Warning("Waiting for target ksvc(s) to appear in namespace",
+				current.Metadata.Namespace, missing)
+			if !sleepOrDone(ctx, idleSleep) {
+				return
+			}
+			continue
+		}
+
+		// Discovery feeds both the saturation check (does .status.perNode
+		// cover every candidate?) and the slow-path loop. Read-only.
+		if err := nw.discoverCandidateNodes(ctx, current); err != nil {
+			logging.Warning("[nodes] discovery failed — retrying on next tick:", err)
+			if !sleepOrDone(ctx, idleSleep) {
+				return
+			}
+			continue
+		}
+
+		// Always load partial state from .status into PerNodeResults so the
+		// per-node loop can inner-skip already-saturated nodes. The outer
+		// flag (current.AllSaturated) is set true only when every candidate
+		// is fully saturated, in which case we skip the search entirely.
+		loadPerNodeFromStatus(current)
+
+		if current.AllSaturated {
+			logging.Info(fmt.Sprintf("Skipping binary search — all %d candidate node(s) saturated: %s/%s",
+				len(current.CandidateNodes),
+				current.Metadata.Namespace, current.Metadata.Name))
 		} else {
-			// Precondition: all target ksvcs must exist before we probe.
-			// Without this we'd run the whole search against a missing
-			// target, every getResptCold/Warm would fail, and we'd persist
-			// garbage CPU values to status. Leave the Nimbus in the queue
-			// so the next tick retries once the user applies the ksvc.
-			if missing := nw.missingTargetKsvcs(ctx, current); len(missing) > 0 {
-				logging.Warning("Waiting for target ksvc(s) to appear in namespace",
-					current.Metadata.Namespace, missing)
-				if !sleepOrDone(ctx, idleSleep) {
-					return
-				}
-				continue
-			}
-
-			// Discover which nodes the ksvc can run on. Read-only; populates
-			// current.CandidateNodes. The list is logged but not yet used
-			// downstream — Phase 2 of the multi-node refactor will loop the
-			// binary search over each candidate node. See multiple_nodes.md.
-			if err := nw.discoverCandidateNodes(ctx, current); err != nil {
-				logging.Warning("[nodes] discovery failed — retrying on next tick:", err)
-				if !sleepOrDone(ctx, idleSleep) {
-					return
-				}
-				continue
-			}
-
 			logging.Stage("STEP PROCESSING:", current.Metadata.Namespace, current.Metadata.Name)
-			if _, err := algorithm.BinarySearch(ctx, current); err != nil {
-				logging.Failure("BinarySearch aborted — leaving Nimbus in queue to retry:", err)
+			if err := nw.runMultiNodeSearch(ctx, current); err != nil {
+				logging.Failure("Multi-node search aborted — leaving Nimbus in queue to retry:", err)
 				if !sleepOrDone(ctx, idleSleep) {
 					return
 				}
 				continue
 			}
+			// Outer flag follows inner state — recompute so AllSaturated
+			// reflects the loop's outcome (true iff every node finished).
+			recomputeAllSaturated(current)
 
-			// Persist finalized values so the next Added event (restart,
-			// re-apply) takes the fast path above.
+			// Persist all per-node results so the next Added event takes the
+			// fast path above. Persisted even on partial completion (some
+			// nodes saturated, search aborted on a later one) so progress
+			// isn't lost — the next reconcile resumes from the saturated set.
 			if err := kubeapi.WriteNimbusStatus(ctx,
 				current.Metadata.Namespace, current.Metadata.Name,
-				current.StartingCPU, current.RunningCPU); err != nil {
+				current.PerNodeResults); err != nil {
 				logging.Failure("Failed to persist Nimbus status:", err)
 			}
 		}
 
+		// Collapse per-node results into a single ksvc-wide CPU limit for
+		// apply. Max is safe: the slowest node's value sets the floor so no
+		// node starves at startup.
+		startingMax := kubeapi.MaxStartingCpu(current.PerNodeResults)
+		runningMax := kubeapi.MaxRunningCpu(current.PerNodeResults)
+
 		// Apply paths are idempotent. Errors are logged inside each helper;
 		// surfacing them here would just duplicate log lines.
-		kubeapi.CreateStartupCPUBoost(ctx, current, current.StartingCPU)
+		kubeapi.CreateStartupCPUBoost(ctx, current, startingMax)
 		for _, ksvc := range current.Selector.MatchExpressions[0].Values {
-			kubeapi.PatchResourceLimits(ctx, current.Metadata.Namespace, ksvc, current.RunningCPU)
+			kubeapi.PatchResourceLimits(ctx, current.Metadata.Namespace, ksvc, runningMax)
 		}
 
 		// Register so the ksvc watcher can propagate RunningCPU to future

@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"k8s.io/apimachinery/pkg/api/resource"
+
+	"nimbus/api/nimbusevent"
 )
 
 // minCPUFloorMilli is the value AdjustCPUMilli falls back to when an
@@ -68,4 +70,42 @@ func IsDiffGreaterThresh(minStr, maxStr string, thresholdMilli int64) (bool, err
 		return false, err
 	}
 	return maxQty.MilliValue()-minQty.MilliValue() > thresholdMilli, nil
+}
+
+// MaxStartingCpu returns the largest StartingCpu across all per-node
+// results, as a Kubernetes-quantity string. Used at apply time to derive
+// a single ksvc-wide CPU limit from a multi-node measurement: taking the
+// max means the slowest node still gets enough CPU to start cleanly.
+// Returns "" when perNode is empty or no entry has a parseable value.
+func MaxStartingCpu(perNode map[string]*nimbusevent.NodeResult) string {
+	return maxCpu(perNode, func(r *nimbusevent.NodeResult) string { return r.StartingCpu })
+}
+
+// MaxRunningCpu — same idea as MaxStartingCpu but for the running-phase
+// converged value.
+func MaxRunningCpu(perNode map[string]*nimbusevent.NodeResult) string {
+	return maxCpu(perNode, func(r *nimbusevent.NodeResult) string { return r.RunningCpu })
+}
+
+func maxCpu(perNode map[string]*nimbusevent.NodeResult, pick func(*nimbusevent.NodeResult) string) string {
+	var bestStr string
+	var bestMilli int64
+	for _, r := range perNode {
+		if r == nil {
+			continue
+		}
+		v := pick(r)
+		if v == "" {
+			continue
+		}
+		q, err := resource.ParseQuantity(v)
+		if err != nil {
+			continue
+		}
+		if bestStr == "" || q.MilliValue() > bestMilli {
+			bestStr = v
+			bestMilli = q.MilliValue()
+		}
+	}
+	return bestStr
 }

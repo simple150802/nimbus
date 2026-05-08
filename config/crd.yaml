@@ -18,12 +18,10 @@ spec:
       subresources:
         status: {}
       additionalPrinterColumns:
-        - name: Starting CPU
+        - name: Nodes
           type: string
-          jsonPath: .status.startingCpu
-        - name: Running CPU
-          type: string
-          jsonPath: .status.runningCpu
+          description: Number of candidate nodes that have been profiled.
+          jsonPath: .status.perNode
         - name: Age
           type: date
           jsonPath: .metadata.creationTimestamp
@@ -154,16 +152,25 @@ spec:
                           type: string
             status:
               description: |
-                Observed state — filled in by the controller. When both
-                startingCpu and runningCpu are non-empty, the binary search
-                has completed and subsequent controller restarts will
-                re-apply these values without re-probing. To force a
-                re-search, clear both fields via the status subresource.
+                Observed state — filled in by the controller. perNode keys
+                are cluster node names; each entry holds the finalized CPU
+                limits the binary search converged to on that node. The
+                Nimbus is considered "completed" once every candidate node
+                has both startingCpu and runningCpu populated, at which
+                point a controller restart will re-apply these values
+                without re-probing. To force a re-search, clear the map
+                via the status subresource.
               type: object
               properties:
-                startingCpu:
-                  description: Finalized CPU limit for the startup phase.
-                  type: string
-                runningCpu:
-                  description: Finalized CPU limit for the running phase.
-                  type: string
+                perNode:
+                  description: Per-node converged CPU limits, keyed by node name.
+                  type: object
+                  additionalProperties:
+                    type: object
+                    properties:
+                      startingCpu:
+                        description: Finalized CPU limit for the startup phase on this node.
+                        type: string
+                      runningCpu:
+                        description: Finalized CPU limit for the running phase on this node.
+                        type: string

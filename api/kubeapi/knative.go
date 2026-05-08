@@ -153,6 +153,72 @@ func UnsetMaxScale(ctx context.Context, namespace, ksvcName string) error {
 	return err
 }
 
+// PinKsvcToNode constrains the ksvc to one node by adding a
+// kubernetes.io/hostname key to spec.template.spec.nodeSelector via a
+// JSON merge-patch. It composes (AND) with whatever nodeSelector or
+// affinity the user already set — fine because the candidate node was
+// computed from those constraints, so it already satisfies them. Paired
+// with UnpinKsvc; each new pin overwrites the previous, so the per-node
+// loop only needs one final unpin.
+func PinKsvcToNode(ctx context.Context, namespace, ksvcName, node string) error {
+	logging.Info(fmt.Sprintf("[set] ksvc pin -> ns=%s ksvc=%s node=%s", namespace, ksvcName, node))
+
+	payload := map[string]interface{}{
+		"spec": map[string]interface{}{
+			"template": map[string]interface{}{
+				"spec": map[string]interface{}{
+					"nodeSelector": map[string]interface{}{
+						"kubernetes.io/hostname": node,
+					},
+				},
+			},
+		},
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	_, err = DYNCLIENT.Resource(KSVC_GVR).Namespace(namespace).Patch(
+		ctx,
+		ksvcName,
+		types.MergePatchType,
+		payloadBytes,
+		metav1.PatchOptions{},
+	)
+	return err
+}
+
+// UnpinKsvc removes only the kubernetes.io/hostname key that PinKsvcToNode
+// added. JSON merge-patch semantics with a null value drop just that key,
+// leaving any user-set nodeSelector entries intact.
+func UnpinKsvc(ctx context.Context, namespace, ksvcName string) error {
+	logging.Info(fmt.Sprintf("[set] ksvc unpin -> ns=%s ksvc=%s", namespace, ksvcName))
+
+	payload := map[string]interface{}{
+		"spec": map[string]interface{}{
+			"template": map[string]interface{}{
+				"spec": map[string]interface{}{
+					"nodeSelector": map[string]interface{}{
+						"kubernetes.io/hostname": nil,
+					},
+				},
+			},
+		},
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	_, err = DYNCLIENT.Resource(KSVC_GVR).Namespace(namespace).Patch(
+		ctx,
+		ksvcName,
+		types.MergePatchType,
+		payloadBytes,
+		metav1.PatchOptions{},
+	)
+	return err
+}
+
 // DeleteKsvcPods force-deletes every pod matching the selector in namespace
 // and returns the names of pods that were actually deleted. Used between
 // cold probes so the next sample can't be served by a lingering pod whose

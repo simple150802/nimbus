@@ -8,34 +8,59 @@ type NimbusEvent struct {
 	Selector NimbusSelector `json:"selector"`
 	Spec     NimbusSpec     `json:"spec"`
 
-	// Status mirrors the CRD's .status subresource. When both StartingCpu and
-	// RunningCpu are non-empty, the binary search has already been completed
-	// for this Nimbus and the worker skips re-running it.
+	// Status mirrors the CRD's .status subresource. The Nimbus is
+	// considered "completed" when status.perNode covers every candidate
+	// node with non-empty StartingCpu and RunningCpu values.
 	Status NimbusStatus `json:"status"`
 
 	Next *NimbusEvent `json:"-"`
 
+	// High / Low are scratchpad bounds for the active binary-search loop.
+	// They are reset at the top of each per-phase wrapper, so reusing the
+	// same fields across nodes in a per-node loop is safe.
 	High string `json:"-"`
 	Low  string `json:"-"`
 
-	StartingSaturated bool   `json:"-"`
-	StartingCPU       string `json:"-"`
-
-	RunningSaturated bool   `json:"-"`
-	RunningCPU       string `json:"-"`
-
 	// CandidateNodes is the list of cluster nodes the target ksvc is
-	// eligible to run on, given its nodeSelector + nodeAffinity. Populated
-	// once when the event enters the worker, sorted lexicographically.
-	// Empty until populated; nil after a discovery error.
+	// eligible to run on, given its nodeSelector + nodeAffinity +
+	// tolerations. Populated once when the event enters the worker, sorted
+	// lexicographically. Empty until populated; nil after a discovery error.
 	CandidateNodes []string `json:"-"`
+
+	// PerNodeResults is the per-node binary-search outcome map, keyed by
+	// node name. BinarySearch writes its converged CPU values directly
+	// into the entry for the node it's currently measuring, so downstream
+	// callers (status persistence, ksvc apply) read all results uniformly.
+	// Populated incrementally as the per-node loop iterates.
+	PerNodeResults map[string]*NodeResult `json:"-"`
+
+	// AllSaturated is the outer skip flag — true iff every candidate node
+	// has both StartingSaturated and RunningSaturated set. The worker
+	// sets it after loading state from .status; when true, the entire
+	// binary search is skipped (fast path).
+	AllSaturated bool `json:"-"`
+}
+
+// NodeResult is the converged CPU pair for one candidate node. CPU fields
+// are empty until the corresponding phase finishes on that node. The two
+// Saturated booleans are the inner skip markers — they mirror the old
+// flat StartingSaturated / RunningSaturated semantic but at per-node
+// granularity. Runtime-only (json:"-"); recomputed from CPU emptiness on
+// load so they don't need to round-trip through .status.
+type NodeResult struct {
+	StartingCpu       string `json:"startingCpu,omitempty"`
+	RunningCpu        string `json:"runningCpu,omitempty"`
+	StartingSaturated bool   `json:"-"`
+	RunningSaturated  bool   `json:"-"`
 }
 
 // NimbusStatus reflects the Nimbus CRD's .status subresource. Field names must
 // match the JSON keys declared in config/crd.yaml exactly.
 type NimbusStatus struct {
-	StartingCpu string `json:"startingCpu,omitempty"`
-	RunningCpu  string `json:"runningCpu,omitempty"`
+	// PerNode keys are node names. A Nimbus is considered "completed"
+	// when every candidate node has a non-empty StartingCpu and RunningCpu
+	// entry here.
+	PerNode map[string]NodeResult `json:"perNode,omitempty"`
 }
 
 // ---------------------------------------------------------

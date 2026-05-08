@@ -1,0 +1,86 @@
+package watcher
+
+import (
+	"context"
+	"fmt"
+
+	"nimbus/api/algorithm"
+	"nimbus/api/kubeapi"
+	"nimbus/api/logging"
+	"nimbus/api/nimbusevent"
+)
+
+// runMultiNodeSearch loops the binary search over each candidate node.
+// Each iteration pins the ksvc to the node so all probed pods land there;
+// each new pin overwrites the previous, so a single deferred unpin at the
+// end is enough to restore the user's scheduling. Inner skip: a node whose
+// PerNodeResults entry is already fully saturated (both phases done from a
+// previous run, recovered from .status) is skipped — same idea as the old
+// flat-Saturated fast path, but at per-node granularity. On any per-node
+// error the loop aborts; partial PerNodeResults stay on the event so the
+// next reconcile can resume from the saturated nodes.
+func (nw *NimbusWatcher) runMultiNodeSearch(ctx context.Context, current *nimbusevent.NimbusEvent) error {
+	ns := current.Metadata.Namespace
+	ksvc := current.Selector.MatchExpressions[0].Values[0]
+
+	defer func() {
+		if err := kubeapi.UnpinKsvc(ctx, ns, ksvc); err != nil {
+			logging.Warning("[nodes] failed to unpin ksvc after search:", err)
+		}
+	}()
+
+	for _, node := range current.CandidateNodes {
+		if r := current.PerNodeResults[node]; r != nil && r.StartingSaturated && r.RunningSaturated {
+			logging.Info(fmt.Sprintf("[nodes] node=%s already saturated (starting=%s running=%s) — skipping",
+				node, r.StartingCpu, r.RunningCpu))
+			continue
+		}
+
+		if err := kubeapi.PinKsvcToNode(ctx, ns, ksvc, node); err != nil {
+			return fmt.Errorf("pin to %s: %w", node, err)
+		}
+		logging.Stage(fmt.Sprintf("[nodes] BinarySearch on node=%s", node))
+		if _, err := algorithm.BinarySearch(ctx, current, node); err != nil {
+			return fmt.Errorf("BinarySearch on %s: %w", node, err)
+		}
+	}
+	return nil
+}
+
+// loadPerNodeFromStatus copies whatever's in .status.perNode into the
+// runtime PerNodeResults map and recomputes the per-phase Saturated flags
+// from the emptiness of the persisted CPU strings. Always called after
+// discovery so the worker can see partial progress from a previous run.
+// Also sets current.AllSaturated via recomputeAllSaturated.
+func loadPerNodeFromStatus(current *nimbusevent.NimbusEvent) {
+	current.PerNodeResults = make(map[string]*nimbusevent.NodeResult, len(current.CandidateNodes))
+	for _, node := range current.CandidateNodes {
+		r := current.Status.PerNode[node]
+		current.PerNodeResults[node] = &nimbusevent.NodeResult{
+			StartingCpu:       r.StartingCpu,
+			RunningCpu:        r.RunningCpu,
+			StartingSaturated: r.StartingCpu != "",
+			RunningSaturated:  r.RunningCpu != "",
+		}
+	}
+	recomputeAllSaturated(current)
+}
+
+// recomputeAllSaturated maintains the invariant that current.AllSaturated
+// is true iff every candidate node has both StartingSaturated and
+// RunningSaturated. Called after loading from status and after the slow
+// path completes so the outer flag never lags the inner state.
+func recomputeAllSaturated(current *nimbusevent.NimbusEvent) {
+	if len(current.CandidateNodes) == 0 {
+		current.AllSaturated = false
+		return
+	}
+	for _, node := range current.CandidateNodes {
+		r := current.PerNodeResults[node]
+		if r == nil || !r.StartingSaturated || !r.RunningSaturated {
+			current.AllSaturated = false
+			return
+		}
+	}
+	current.AllSaturated = true
+}

@@ -70,9 +70,14 @@ func (nw *NimbusWatcher) maybePatchNewKsvc(ctx context.Context, ksvc *unstructur
 			if v != name {
 				continue
 			}
+			runningMax := kubeapi.MaxRunningCpu(nimbus.PerNodeResults)
+			if runningMax == "" {
+				logging.Warning("ksvc watcher: skipping propagation, no per-node results yet for", ns+"/"+name)
+				return
+			}
 			logging.Info("Propagating RunningCPU to new ksvc:",
-				ns+"/"+name, "->", nimbus.RunningCPU)
-			if err := kubeapi.PatchResourceLimits(ctx, ns, name, nimbus.RunningCPU); err != nil {
+				ns+"/"+name, "->", runningMax)
+			if err := kubeapi.PatchResourceLimits(ctx, ns, name, runningMax); err != nil {
 				logging.Failure("ksvc watcher: patch failed:", err)
 			}
 			return

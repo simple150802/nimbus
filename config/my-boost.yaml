@@ -20,8 +20,8 @@ spec:
     - containerName: user-container
       resourceRange:
         limits:
-          min: "200m"
-          max: "2"
+          min: "300m"
+          max: "1"
   durationPolicy:
     apiCondition:
       url: "http://measure-yolo.serverless.svc.cluster.local/status"
