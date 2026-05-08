@@ -12,12 +12,12 @@
 
 ---
 
-A Kubernetes controller that **automatically profiles** the optimal CPU limit for Knative services using a two-phase binary search. For every workload it discovers two values:
+A Kubernetes controller that **automatically profiles** the optimal CPU limit for Knative services using a two-phase binary search. For every workload, on every candidate node, it discovers two values:
 
 - a **starting-phase CPU** — the limit applied during cold start, programmed via a `StartupCPUBoost` CR;
 - a **running-phase CPU** — the limit applied at steady state, written directly into the Knative service spec.
 
-Both values are persisted to the controller's CRD `.status` subresource so subsequent restarts of the controller skip the (expensive) search and just re-apply the known-good values.
+The search runs once per candidate node (any node the ksvc's `nodeSelector` + `nodeAffinity` + tolerations permit). Per-node results are persisted to `.status.perNode` so subsequent controller restarts skip the (expensive) search and re-apply the known-good values. At apply time the per-node values are collapsed to a single ksvc-wide CPU limit using the **max** strategy (slowest node's value as cluster-wide floor — no node starves at startup).
 
 
 ---
@@ -38,7 +38,14 @@ NIMBUS improves on both:
 
 ## How the binary search works
 
-The search runs in two phases per Nimbus CRD:
+Per Nimbus, the controller:
+
+1. **Discovers candidate nodes** — intersects Ready+!unschedulable nodes with the target ksvc's `nodeSelector`, required `nodeAffinity`, and tolerations vs. taints.
+2. **Loops over candidates**: for each node not already saturated in `.status.perNode`, pin the ksvc to that node (one extra `kubernetes.io/hostname` key on `spec.template.spec.nodeSelector`, AND-composing with the user's existing constraints) and run the two-phase search.
+3. **Unpins** the ksvc once at the end (single deferred unpin — each iteration's pin overwrites the previous).
+4. **Persists** every per-node converged pair to `.status.perNode`, then **collapses** to `MaxStartingCpu` / `MaxRunningCpu` for the cluster-wide ksvc apply.
+
+Each per-node search runs the same two phases:
 
 ### Starting phase
 
@@ -46,16 +53,16 @@ The search runs in two phases per Nimbus CRD:
 - `high := spec.resourcePolicy.containerPolicies[0].resourceRange.limits.max`
 - Each probe creates a `StartupCPUBoost` CR at the candidate CPU, force-deletes the existing pod, waits for scale-to-zero, and measures the cold-start response time of `durationPolicy.apiCondition.url`.
 - The midpoint is treated as the new `high` (or `low` if response time improved by > 10%) until `high - low ≤ 100m`.
-- The converged `high` becomes `status.startingCpu`.
+- The converged `high` is written to `.status.perNode[<node>].startingCpu`.
 
 ### Running phase
 
-- `low := spec.min - 50m`, `high := status.startingCpu`.
+- `low := spec.min - 50m`, `high := <this-node>.startingCpu`.
 - Probes use the warm path: patch the ksvc to the candidate CPU, wait for the new revision to scale to zero, trigger N warm requests, average the response times.
 - Same convergence rule (`high - low ≤ 100m`).
-- The converged `high` becomes `status.runningCpu`.
+- The converged `high` is written to `.status.perNode[<node>].runningCpu`.
 
-A single ksvc is pinned via `autoscaling.knative.dev/max-scale=1` for the duration of the search so every measurement reflects exactly one pod; the cap is removed when the search returns.
+A single ksvc is pinned via `autoscaling.knative.dev/max-scale=1` for the duration of the search so every measurement reflects exactly one pod; the cap is removed when the search returns. Two-layer saturation: a node is "saturated" when both phases finished for it; the Nimbus is "complete" when every candidate is saturated. Partial completion (e.g., search aborted mid-loop) is persisted, and the next reconcile resumes from the unsaturated set.
 
 The flow chart for the algorithm:
 
@@ -70,8 +77,8 @@ The flow chart for the algorithm:
 | Group | `lazyken.io` |
 | Version | `v1alpha1` |
 | Kind | `Nimbus` |
-| Plural | `nimbus` |
-| Short name | `car` |
+| Plural | `nimbuses` |
+| Short name | `nb` |
 | Scope | Namespaced |
 
 Sample manifest (also in [config/my-boost.yaml](config/my-boost.yaml)):
@@ -115,14 +122,20 @@ spec:
 - **`spec.measurement.coldSamples`** — number of cold-start samples per probe (default 1, minimum 1). Each sample = one full scale-to-zero + cold-start cycle.
 - **`spec.measurement.warmSamples`** — number of warm-request samples per probe (default 10). Cheap.
 - **`spec.durationPolicy.apiCondition.{url,response}`** — only `apiCondition` is implemented (the upstream project's `fixed` and `podCondition` policies are not honored). The controller GETs `url` until the body contains `response`.
-- **`status.startingCpu`** / **`status.runningCpu`** — written by the controller after a successful search. Their presence acts as a memoization key: subsequent reconciles skip the search and re-apply these values. Clear them with `kubectl patch ... --subresource=status` to force a re-search.
+- **`status.perNode`** — a map keyed by node name. Each entry holds:
+  - `startingCpu` / `runningCpu` — the converged values used at apply time (collapsed to the cluster-wide max).
+  - `coldRtSamples` / `warmRtSamples` — every `(cpu, rtMillis)` probe point the binary search visited for that node, ordered by ascending CPU. Consumed by the online stage to fit `RT(x)` without re-probing; safe to ignore for now.
 
-`kubectl get nimbus` shows finalized values directly:
+  The map populates as the per-node loop progresses; once every candidate node has both `startingCpu` and `runningCpu` non-empty, the Nimbus is "complete" and a controller restart re-applies the values without re-probing. Clear with `kubectl patch ... --subresource=status` to force a re-search.
+
+`kubectl get nimbus` shows the count of profiled nodes:
 
 ```
-NAME        STARTING CPU   RUNNING CPU   AGE
-boost-001   706m           219m          2m
+NAME        NODES                                                    AGE
+boost-001   map[master:map[startingCpu:706m runningCpu:219m] ...]    2m
 ```
+
+(The raw map renders awkwardly in the printer column. Use `-o yaml` for a clean read of `.status.perNode`.)
 
 ---
 
@@ -131,9 +144,19 @@ boost-001   706m           219m          2m
 Prerequisites:
 - A Kubernetes cluster with [Knative Serving](https://knative.dev) installed.
 - [`kube-startup-cpu-boost`](https://github.com/google/kube-startup-cpu-boost) deployed (the upstream mutating webhook is what NIMBUS drives).
+- The boost controller configured to **preserve CPU limits on revert** — see step 0 below.
 - A target Knative service in scope of the `selector.matchExpressions[0].values` list, exposing the `apiCondition.url` endpoint.
 
 ```bash
+# 0. Ensure kube-startup-cpu-boost preserves the CPU limit when the boost
+# expires (instead of stripping it entirely). NIMBUS writes the
+# running-phase value into the ksvc spec; if the boost controller removes
+# limits on revert, NIMBUS's running-phase value is lost and pods come
+# back unbounded after the boost window.
+kubectl set env deployment/kube-startup-cpu-boost-controller-manager \
+  -n kube-startup-cpu-boost-system \
+  REMOVE_LIMITS=false
+
 # 1. Install the Nimbus CRD
 kubectl apply -f config/crd.yaml
 
@@ -147,15 +170,23 @@ go run ./cmd
 kubectl apply -f config/my-boost.yaml
 
 # 5. Watch the search progress in the controller terminal
-# 6. When the search converges, finalized values are visible:
-kubectl get nimbus -n serverless
+# 6. When the search converges, per-node finalized values are visible:
+kubectl get nimbus -n serverless -o yaml | grep -A20 'status:'
 ```
 
 To re-run the search after completion, clear the status:
 
 ```bash
 kubectl patch nimbus boost-001 -n serverless --subresource=status --type=merge \
-  -p '{"status":{"startingCpu":"","runningCpu":""}}'
+  -p '{"status":{"perNode":null}}'
+```
+
+To force a re-search of just one node (after, say, a kernel upgrade):
+
+```bash
+# Re-running just `worker`:
+kubectl patch nimbus boost-001 -n serverless --subresource=status --type=merge \
+  -p '{"status":{"perNode":{"worker":{"startingCpu":"","runningCpu":""}}}}'
 ```
 
 ---
@@ -176,8 +207,15 @@ The controller writes colored, tagged output via `api/logging`:
 | `[set] ksvc maxScale=1 -> ...` / `[set] ksvc maxScale=<unset> -> ...` | The 1-pod cap is set at the start of the search and removed when it returns. |
 | `[set] StartupCPUBoost -> ...` | The intermediate boost CR was upserted. |
 | `[<phase>][monitor] pod=... cpuLimit=...` | Monitor goroutine reports the user-container's effective limit, only during the trigger window. |
-| `Skipping binary search — Nimbus already completed: ...` | Fast path: `.status` already carries finalized values. |
-| `Propagating RunningCPU to new ksvc: ...` | A late-created ksvc matched a completed Nimbus's selector and was patched to its `runningCpu`. |
+| `[nodes] <ns>/<name> candidates: [...]` | Discovered candidate-node list at the top of each search. |
+| `[nodes] BinarySearch on node=<n>` | Start of one per-node iteration in the multi-node loop. |
+| `[nodes] node=<n> already saturated ... — skipping` | Inner-skip: this node was completed in a previous run; loop moves on. |
+| `[node=<n>] starting CPU: ... | running CPU: ...` | Per-node summary at end of `BinarySearch`. |
+| `[set] ksvc pin -> ns=... ksvc=... node=...` | `PinKsvcToNode` adds the per-loop hostname constraint. |
+| `[set] ksvc unpin -> ns=... ksvc=...` | `UnpinKsvc` (deferred, fires once after the loop). |
+| `Skipping binary search — all <N> candidate node(s) saturated: ns/name` | Outer fast path: every candidate already has saturated values. |
+| `Nimbus status persisted: ns/name perNode=<N> entries` | `WriteNimbusStatus` after a slow-path completion (full or partial). |
+| `Propagating RunningCPU to new ksvc: ... -> <max>` | A late-created ksvc matched a completed Nimbus's selector and was patched to `MaxRunningCpu`. |
 
 ---
 
@@ -186,6 +224,7 @@ The controller writes colored, tagged output via `api/logging`:
 - Only **Knative services** are supported as targets (the selector key is hardcoded to `serving.knative.dev/service` semantics).
 - A Nimbus CRD currently programs **one ksvc, one container policy** — the controller indexes `[0]` for both `matchExpressions` and `containerPolicies` and assumes the container is named `user-container`.
 - The `durationPolicy` only supports `apiCondition`. The `fixed` and `podCondition` policies present in the upstream `StartupCPUBoost` CRD are not honored here.
-- Cold probes can take a long time at low CPU values; the search auto-aborts an individual probe after 2 minutes and retries up to 3 times, then surfaces the failure so the worker can re-attempt the whole Nimbus on the next tick.
+- Cold probes can take a long time at low CPU values; the search auto-aborts an individual probe after 2 minutes and retries up to 3 times. Warm probes have no per-sample retry budget yet — a flaky network kills the whole search.
+- **Multi-node measurement** lands per-node values into `.status.perNode`, but at apply time the per-node values are collapsed to the cluster-wide max for a single ksvc CPU limit. Per-pod, per-node CPU (Phase 3 — in-place pod resize on k8s 1.33+) is designed but not implemented; see [multiple_nodes.md](multiple_nodes.md) §4.
 - No metrics / tracing — observability is print-only at the moment.
 - The intended environment is a **local dev cluster**; the project doesn't ship RBAC manifests, a populated Dockerfile, or CI.
