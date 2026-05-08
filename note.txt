@@ -1,3 +1,0 @@
-kubectl set env deployment/kube-startup-cpu-boost-controller-manager \
-  -n kube-startup-cpu-boost-system \
-  REMOVE_LIMITS=false
