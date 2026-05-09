@@ -47,11 +47,29 @@ type NimbusEvent struct {
 // flat StartingSaturated / RunningSaturated semantic but at per-node
 // granularity. Runtime-only (json:"-"); recomputed from CPU emptiness on
 // load so they don't need to round-trip through .status.
+//
+// ColdRtSamples / WarmRtSamples capture every (cpu, rt) probe point the
+// binary search visited, in ascending-cpu order. The online stage's
+// algorithms (algorithm.md §2.2.3) consume these as the per-pod RT_i(x)
+// curve via piecewise-linear interpolation. One SamplePoint per probe
+// call (cpu = the CPU just probed, rt = the average across that probe's
+// coldSamples / warmSamples). Sorted at end-of-phase by ascending cpu.
 type NodeResult struct {
-	StartingCpu       string `json:"startingCpu,omitempty"`
-	RunningCpu        string `json:"runningCpu,omitempty"`
-	StartingSaturated bool   `json:"-"`
-	RunningSaturated  bool   `json:"-"`
+	StartingCpu       string        `json:"startingCpu,omitempty"`
+	RunningCpu        string        `json:"runningCpu,omitempty"`
+	ColdRtSamples     []SamplePoint `json:"coldRtSamples,omitempty"`
+	WarmRtSamples     []SamplePoint `json:"warmRtSamples,omitempty"`
+	StartingSaturated bool          `json:"-"`
+	RunningSaturated  bool          `json:"-"`
+}
+
+// SamplePoint is one (cpu, rt) measurement from a single binary-search
+// probe. Cpu is a Kubernetes-quantity string ("706m", "1500m"); RtMillis
+// is the response time in milliseconds (int64 instead of time.Duration
+// so the wire form reads cleanly via `kubectl get -o yaml`).
+type SamplePoint struct {
+	Cpu      string `json:"cpu"`
+	RtMillis int64  `json:"rtMillis"`
 }
 
 // NimbusStatus reflects the Nimbus CRD's .status subresource. Field names must

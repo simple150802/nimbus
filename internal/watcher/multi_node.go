@@ -56,9 +56,21 @@ func loadPerNodeFromStatus(current *nimbusevent.NimbusEvent) {
 	current.PerNodeResults = make(map[string]*nimbusevent.NodeResult, len(current.CandidateNodes))
 	for _, node := range current.CandidateNodes {
 		r := current.Status.PerNode[node]
+		// Defensive copies of the sample slices so the runtime view doesn't
+		// share backing storage with current.Status.PerNode (which the watch
+		// decoder still owns and may reuse on the next event).
+		var cold, warm []nimbusevent.SamplePoint
+		if len(r.ColdRtSamples) > 0 {
+			cold = append([]nimbusevent.SamplePoint(nil), r.ColdRtSamples...)
+		}
+		if len(r.WarmRtSamples) > 0 {
+			warm = append([]nimbusevent.SamplePoint(nil), r.WarmRtSamples...)
+		}
 		current.PerNodeResults[node] = &nimbusevent.NodeResult{
 			StartingCpu:       r.StartingCpu,
 			RunningCpu:        r.RunningCpu,
+			ColdRtSamples:     cold,
+			WarmRtSamples:     warm,
 			StartingSaturated: r.StartingCpu != "",
 			RunningSaturated:  r.RunningCpu != "",
 		}

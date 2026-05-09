@@ -22,15 +22,24 @@ import (
 //	kubectl patch nimbus <name> -n <ns> --subresource=status --type=merge \
 //	    -p '{"status":{"perNode":null}}'
 func WriteNimbusStatus(ctx context.Context, namespace, name string, perNode map[string]*nimbusevent.NodeResult) error {
-	statusMap := make(map[string]map[string]string, len(perNode))
+	statusMap := make(map[string]interface{}, len(perNode))
 	for node, r := range perNode {
 		if r == nil {
 			continue
 		}
-		statusMap[node] = map[string]string{
+		entry := map[string]interface{}{
 			"startingCpu": r.StartingCpu,
 			"runningCpu":  r.RunningCpu,
 		}
+		// Only include sample arrays when populated — keeps partial-progress
+		// patches small and lets the CRD's omitempty stay meaningful.
+		if len(r.ColdRtSamples) > 0 {
+			entry["coldRtSamples"] = r.ColdRtSamples
+		}
+		if len(r.WarmRtSamples) > 0 {
+			entry["warmRtSamples"] = r.WarmRtSamples
+		}
+		statusMap[node] = entry
 	}
 
 	payload := map[string]interface{}{

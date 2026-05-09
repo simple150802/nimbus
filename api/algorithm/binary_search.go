@@ -3,7 +3,10 @@ package algorithm
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
+
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	"nimbus/api/kubeapi"
 	"nimbus/api/logging"
@@ -82,16 +85,23 @@ type probeFn func(ctx context.Context, current *nimbusevent.NimbusEvent, cpu str
 // at low, mid, and high, and chooses which bound to move based on the
 // 10% improvement gate. Stops when high - low <= convergenceThresholdMilli.
 // On success it writes setResult(current.High) and returns current.High.
+//
+// recordSample is invoked once per probe call with the (cpu, rt) pair
+// the probe just measured. The per-phase wrapper appends these into the
+// active node's ColdRtSamples / WarmRtSamples slice; runBinarySearch
+// itself stays storage-agnostic.
 func runBinarySearch(
 	ctx context.Context,
 	current *nimbusevent.NimbusEvent,
 	probe probeFn,
 	setResult func(cpu string),
+	recordSample func(cpu string, rt time.Duration),
 ) (string, error) {
 	rtLow, err := probe(ctx, current, current.Low)
 	if err != nil {
 		return "", err
 	}
+	recordSample(current.Low, rtLow)
 
 	for {
 		shouldContinue, err := kubeapi.IsDiffGreaterThresh(current.Low, current.High, convergenceThresholdMilli)
@@ -116,12 +126,14 @@ func runBinarySearch(
 		if err != nil {
 			return "", err
 		}
+		recordSample(midCPU, rtMid)
 
 		if float64(rtLow-rtMid)/float64(rtLow) > responseTimeImprovementGate {
 			rtHigh, err := probe(ctx, current, current.High)
 			if err != nil {
 				return "", err
 			}
+			recordSample(current.High, rtHigh)
 			if float64(rtMid-rtHigh)/float64(rtMid) > responseTimeImprovementGate {
 				current.Low = midCPU
 				rtLow = rtMid
@@ -132,6 +144,23 @@ func runBinarySearch(
 			current.High = midCPU
 		}
 	}
+}
+
+// sortSamplesByCpu canonicalizes a sample list so the persisted order
+// matches what the online stage's piecewise-linear interpolator expects
+// (ascending cpu). Called once at end-of-phase, after all samples for
+// a (node, phase) tuple have been collected.
+func sortSamplesByCpu(samples []nimbusevent.SamplePoint) {
+	sort.Slice(samples, func(i, j int) bool {
+		qi, errI := resource.ParseQuantity(samples[i].Cpu)
+		qj, errJ := resource.ParseQuantity(samples[j].Cpu)
+		// Unparseable strings sort to the end deterministically; should
+		// never happen since CalculateAverageCPU produces valid quantities.
+		if errI != nil || errJ != nil {
+			return errI == nil && errJ != nil
+		}
+		return qi.MilliValue() < qj.MilliValue()
+	})
 }
 
 func binarySearchForStartingPhase(ctx context.Context, current *nimbusevent.NimbusEvent, node string) (string, error) {
@@ -145,7 +174,15 @@ func binarySearchForStartingPhase(ctx context.Context, current *nimbusevent.Nimb
 		current.PerNodeResults[node].StartingCpu = cpu
 		current.PerNodeResults[node].StartingSaturated = true
 	}
-	return runBinarySearch(ctx, current, probe, setResult)
+	recordSample := func(cpu string, rt time.Duration) {
+		current.PerNodeResults[node].ColdRtSamples = append(
+			current.PerNodeResults[node].ColdRtSamples,
+			nimbusevent.SamplePoint{Cpu: cpu, RtMillis: rt.Milliseconds()},
+		)
+	}
+	cpu, err := runBinarySearch(ctx, current, probe, setResult, recordSample)
+	sortSamplesByCpu(current.PerNodeResults[node].ColdRtSamples)
+	return cpu, err
 }
 
 func binarySearchForRunningPhase(ctx context.Context, current *nimbusevent.NimbusEvent, node string) (string, error) {
@@ -164,5 +201,13 @@ func binarySearchForRunningPhase(ctx context.Context, current *nimbusevent.Nimbu
 		current.PerNodeResults[node].RunningCpu = cpu
 		current.PerNodeResults[node].RunningSaturated = true
 	}
-	return runBinarySearch(ctx, current, probe, setResult)
+	recordSample := func(cpu string, rt time.Duration) {
+		current.PerNodeResults[node].WarmRtSamples = append(
+			current.PerNodeResults[node].WarmRtSamples,
+			nimbusevent.SamplePoint{Cpu: cpu, RtMillis: rt.Milliseconds()},
+		)
+	}
+	cpu, err := runBinarySearch(ctx, current, probe, setResult, recordSample)
+	sortSamplesByCpu(current.PerNodeResults[node].WarmRtSamples)
+	return cpu, err
 }

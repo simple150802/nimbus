@@ -163,7 +163,7 @@ spec:
               type: object
               properties:
                 perNode:
-                  description: Per-node converged CPU limits, keyed by node name.
+                  description: Per-node converged CPU limits + probe samples, keyed by node name.
                   type: object
                   additionalProperties:
                     type: object
@@ -174,3 +174,35 @@ spec:
                       runningCpu:
                         description: Finalized CPU limit for the running phase on this node.
                         type: string
+                      coldRtSamples:
+                        description: |
+                          (cpu, rt) points the binary search visited during the
+                          starting phase on this node, ordered by ascending cpu.
+                          Consumed by the online stage to fit RT_i(x) without
+                          re-probing.
+                        type: array
+                        items:
+                          type: object
+                          required: [cpu, rtMillis]
+                          properties:
+                            cpu:
+                              type: string
+                              pattern: "^(\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))))?$"
+                            rtMillis:
+                              type: integer
+                              minimum: 0
+                      warmRtSamples:
+                        description: |
+                          (cpu, rt) points the binary search visited during the
+                          running phase on this node, ordered by ascending cpu.
+                        type: array
+                        items:
+                          type: object
+                          required: [cpu, rtMillis]
+                          properties:
+                            cpu:
+                              type: string
+                              pattern: "^(\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))))?$"
+                            rtMillis:
+                              type: integer
+                              minimum: 0
