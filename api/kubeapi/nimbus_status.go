@@ -42,10 +42,21 @@ func WriteNimbusStatus(ctx context.Context, namespace, name string, perNode map[
 		statusMap[node] = entry
 	}
 
+	// Cluster-wide aggregates — max over per-node so the slowest node
+	// still meets the configured RT budget. Surfaced on .status alongside
+	// the per-node map so operators can see, via `kubectl get nimbus -o
+	// yaml`, exactly which CPU values the controller is applying.
+	statusPayload := map[string]interface{}{
+		"perNode": statusMap,
+	}
+	if runningMax := MaxRunningCpu(perNode); runningMax != "" {
+		statusPayload["runningCpu"] = runningMax
+	}
+	if startingMax := MaxStartingCpu(perNode); startingMax != "" {
+		statusPayload["startingCpu"] = startingMax
+	}
 	payload := map[string]interface{}{
-		"status": map[string]interface{}{
-			"perNode": statusMap,
-		},
+		"status": statusPayload,
 	}
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {

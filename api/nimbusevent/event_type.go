@@ -75,9 +75,23 @@ type SamplePoint struct {
 // NimbusStatus reflects the Nimbus CRD's .status subresource. Field names must
 // match the JSON keys declared in config/crd.yaml exactly.
 type NimbusStatus struct {
+	// RunningCpu is the cluster-wide steady-state CPU limit applied to
+	// the ksvc spec. Derived as max over PerNode[*].RunningCpu so the
+	// slowest node still meets the running-phase target. Operators read
+	// this via `kubectl get nimbus -o yaml` to see which value the
+	// controller chose; it is rewritten whenever PerNode changes.
+	RunningCpu string `json:"runningCpu,omitempty"`
+
+	// StartingCpu is the cluster-wide cold-phase CPU limit applied via
+	// StartupCPUBoost. Derived as max over PerNode[*].StartingCpu so the
+	// slowest node still cold-starts within the configured RT budget.
+	StartingCpu string `json:"startingCpu,omitempty"`
+
 	// PerNode keys are node names. A Nimbus is considered "completed"
 	// when every candidate node has a non-empty StartingCpu and RunningCpu
-	// entry here.
+	// entry here. The aggregate RunningCpu / StartingCpu fields above are
+	// derived from this map and are purely observational — the runtime
+	// path computes max on the fly when applying values.
 	PerNode map[string]NodeResult `json:"perNode,omitempty"`
 }
 
