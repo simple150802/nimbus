@@ -1,0 +1,4 @@
+# Per-run sample-export tree written by the controller when spec.export.dir
+# is set (see internal/export/export.go). Each run gets a timestamped
+# subdirectory; never commit them.
+results/
