@@ -16,13 +16,15 @@ import (
 // fires one warmup curl to bring a fresh pod up, then runs
 // measurement.warmSamples timed curls and returns the mean. cpuCold is the
 // boost CPU used during the cold-start of the warmup pod (the upstream
-// webhook applies it via the StartupCPUBoost CR).
+// webhook applies it via the StartupCPUBoost CR). When onSample is non-nil,
+// it is invoked once per individual timed sample (NOT the warmup curl) so
+// the export pipeline can stream raw rows; nil disables the side-channel.
 //
 // maxScale=1 is set once by BinarySearch and not touched here.
 //
 // No stuck-pod auto-recovery: a warm probe failure aborts the whole search
 // so RunWorker can retry on the next tick.
-func getResptWarm(ctx context.Context, event *nimbusevent.NimbusEvent, cpuValue string, cpuCold string) (time.Duration, error) {
+func getResptWarm(ctx context.Context, event *nimbusevent.NimbusEvent, cpuValue string, cpuCold string, onSample SampleSink) (time.Duration, error) {
 	logging.Stage(fmt.Sprintf("[WARM] probe starting — cpu=%s cold_boost=%s ns=%s", cpuValue, cpuCold, event.Metadata.Namespace))
 	labelSelector := buildLabelSelector(event)
 
@@ -82,6 +84,9 @@ func getResptWarm(ctx context.Context, event *nimbusevent.NimbusEvent, cpuValue 
 			return 0, err
 		}
 		logging.Normal(fmt.Sprintf("[WARM] sample %d/%d: cpu=%s rt=%s", i+1, n, cpuValue, rt))
+		if onSample != nil {
+			onSample(rt)
+		}
 		sum += rt
 		if i < n-1 {
 			logging.Normal(fmt.Sprintf("[WARM] cool-down %s before next sample", interSampleSleep))

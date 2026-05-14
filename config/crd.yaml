@@ -41,6 +41,27 @@ spec:
               type: object
               required: [resourcePolicy, durationPolicy]
               properties:
+                export:
+                  description: |
+                    Optional sample-export configuration. When set, the
+                    controller writes per-probe raw TTFB samples to a
+                    timestamped subdirectory under .dir, alongside a
+                    meta.json snapshot of the Nimbus spec and per-node
+                    result.json files with the converged CPU values. Absent
+                    field = no export.
+                  type: object
+                  required: [dir]
+                  properties:
+                    dir:
+                      description: |
+                        Filesystem path where samples are written. Relative
+                        paths resolve against the controller's working
+                        directory. Absolute paths are used as-is. Local-dev
+                        scope: '..' segments are allowed so operators can
+                        place results outside the controller's cwd.
+                      type: string
+                      minLength: 1
+                      pattern: '^[A-Za-z0-9_./-]+$'
                 measurement:
                   description: |
                     Controls how many samples the controller averages per

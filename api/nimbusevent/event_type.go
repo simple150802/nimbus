@@ -39,6 +39,14 @@ type NimbusEvent struct {
 	// sets it after loading state from .status; when true, the entire
 	// binary search is skipped (fast path).
 	AllSaturated bool `json:"-"`
+
+	// ExportRoot is the absolute filesystem path the controller writes
+	// raw per-sample CSVs + meta.json + per-node result.json to during
+	// this run's binary search. Set once by runMultiNodeSearch via
+	// internal/export.InitRunDir; empty string means export is disabled
+	// (spec.export unset or directory uncreatable). Probe helpers read
+	// this field to decide whether to write per-probe CSVs.
+	ExportRoot string `json:"-"`
 }
 
 // NodeResult is the converged CPU pair for one candidate node. CPU fields
@@ -120,6 +128,15 @@ type NimbusSpec struct {
 	ResourcePolicy ResourcePolicy    `json:"resourcePolicy"`
 	DurationPolicy DurationPolicy    `json:"durationPolicy"`
 	Measurement    MeasurementPolicy `json:"measurement,omitempty"`
+	Export         *ExportSpec       `json:"export,omitempty"`
+}
+
+// ExportSpec configures filesystem export of raw per-probe samples.
+// When the Nimbus omits spec.export, no export happens. When set, the
+// controller creates <Dir>/<timestamp>/ at search start and writes
+// meta.json, per-node result.json, and per-probe <cpu>.csv files there.
+type ExportSpec struct {
+	Dir string `json:"dir"`
 }
 
 // MeasurementPolicy controls how many samples the controller averages per

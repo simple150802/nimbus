@@ -11,6 +11,7 @@ import (
 	"nimbus/api/kubeapi"
 	"nimbus/api/logging"
 	"nimbus/api/nimbusevent"
+	"nimbus/internal/export"
 )
 
 const (
@@ -163,12 +164,26 @@ func sortSamplesByCpu(samples []nimbusevent.SamplePoint) {
 	})
 }
 
+// makeSampleSink returns a SampleSink that appends one CSV row per call
+// to <ExportRoot>/<node>/<phase>/<cpu>.csv. Returns nil when ExportRoot is
+// empty (export disabled), so getResptCold/getResptWarm skip the call.
+func makeSampleSink(current *nimbusevent.NimbusEvent, node, phase, cpu string) SampleSink {
+	if current.ExportRoot == "" {
+		return nil
+	}
+	return func(rt time.Duration) {
+		if err := export.AppendSample(current.ExportRoot, node, phase, cpu, rt.Milliseconds()); err != nil {
+			logging.Warning(fmt.Sprintf("[export] AppendSample failed (%s %s %s): %v", node, phase, cpu, err))
+		}
+	}
+}
+
 func binarySearchForStartingPhase(ctx context.Context, current *nimbusevent.NimbusEvent, node string) (string, error) {
 	current.Low = current.Spec.ResourcePolicy.ContainerPolicies[0].ResourceRange.Limits.Min
 	current.High = current.Spec.ResourcePolicy.ContainerPolicies[0].ResourceRange.Limits.Max
 
 	probe := func(ctx context.Context, ev *nimbusevent.NimbusEvent, cpu string) (time.Duration, error) {
-		return getResptCold(ctx, ev, cpu)
+		return getResptCold(ctx, ev, cpu, makeSampleSink(ev, node, "cold", cpu))
 	}
 	setResult := func(cpu string) {
 		current.PerNodeResults[node].StartingCpu = cpu
@@ -195,7 +210,7 @@ func binarySearchForRunningPhase(ctx context.Context, current *nimbusevent.Nimbu
 	current.High = current.PerNodeResults[node].StartingCpu
 
 	probe := func(ctx context.Context, ev *nimbusevent.NimbusEvent, cpu string) (time.Duration, error) {
-		return getResptWarm(ctx, ev, cpu, current.High)
+		return getResptWarm(ctx, ev, cpu, current.High, makeSampleSink(ev, node, "warm", cpu))
 	}
 	setResult := func(cpu string) {
 		current.PerNodeResults[node].RunningCpu = cpu

@@ -26,12 +26,20 @@ const (
 	maxStuckRetries = 3
 )
 
+// SampleSink, when non-nil, is invoked once per individual sample with
+// the measured response time. Used by the export pipeline to stream raw
+// per-sample CSV rows without ever holding the samples in a slice. nil
+// disables the side-channel; getResptCold/getResptWarm work the same.
+type SampleSink func(rt time.Duration)
+
 // getResptCold runs measurement.coldSamples cold-start probes at cpuValue
-// and returns the mean response time. The StartupCPUBoost CR is created
-// once (so each fresh pod is injected with cpuValue by the upstream
-// webhook) and torn down on return; the resource monitor is started per
-// sample only during triggerHttp.
-func getResptCold(ctx context.Context, event *nimbusevent.NimbusEvent, cpuValue string) (time.Duration, error) {
+// and returns the mean response time. When onSample is non-nil, it is
+// invoked once per individual sample as soon as the measurement is taken
+// (used by the export pipeline; see internal/export). The StartupCPUBoost
+// CR is created once (so each fresh pod is injected with cpuValue by the
+// upstream webhook) and torn down on return; the resource monitor is
+// started per sample only during triggerHttp.
+func getResptCold(ctx context.Context, event *nimbusevent.NimbusEvent, cpuValue string, onSample SampleSink) (time.Duration, error) {
 	logging.Stage(fmt.Sprintf("[COLD] probe starting — cpu=%s ns=%s", cpuValue, event.Metadata.Namespace))
 	labelSelector := buildLabelSelector(event)
 
@@ -65,6 +73,9 @@ func getResptCold(ctx context.Context, event *nimbusevent.NimbusEvent, cpuValue 
 			return 0, err
 		}
 		logging.Normal(fmt.Sprintf("[COLD] sample %d/%d: cpu=%s rt=%s", i+1, n, cpuValue, rt))
+		if onSample != nil {
+			onSample(rt)
+		}
 		sum += rt
 	}
 

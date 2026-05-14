@@ -7,8 +7,15 @@ selector:
   matchExpressions:
   - key: serving.knative.dev/service
     operator: In
-    values: ["measure-yolo"]
+    values: ["measure-yolo-001", "measure-yolo-002", "measure-yolo-003"]
 spec:
+  # When set, the controller writes raw per-sample CSVs + meta.json + per-node
+  # result.json under <dir>/<run-start-timestamp>/. Path is relative to the
+  # controller's working directory (run `go run ./cmd` from the repo root and
+  # results land at <repo>/results/). Omit `spec.export` entirely to disable.
+  export:
+    dir: "../results"
+
   # measurement is optional; omit to accept the defaults (1 cold sample,
   # 10 warm samples). Cold samples are expensive because each forces a
   # scale-to-zero before a fresh cold start.
@@ -21,8 +28,8 @@ spec:
       resourceRange:
         limits:
           min: "300m"
-          max: "1"
+          max: "500m"
   durationPolicy:
     apiCondition:
-      url: "http://measure-yolo.serverless.svc.cluster.local/status"
+      url: "http://measure-yolo-001.serverless.svc.cluster.local/status"
       response: "READY"

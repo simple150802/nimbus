@@ -3,11 +3,13 @@ package watcher
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"nimbus/api/algorithm"
 	"nimbus/api/kubeapi"
 	"nimbus/api/logging"
 	"nimbus/api/nimbusevent"
+	"nimbus/internal/export"
 )
 
 // runMultiNodeSearch loops the binary search over each candidate node.
@@ -22,6 +24,21 @@ import (
 func (nw *NimbusWatcher) runMultiNodeSearch(ctx context.Context, current *nimbusevent.NimbusEvent) error {
 	ns := current.Metadata.Namespace
 	ksvc := current.Selector.MatchExpressions[0].Values[0]
+
+	// Initialise sample-export filesystem layout if the Nimbus opted in via
+	// spec.export.dir. Failure is non-fatal — search proceeds with no export.
+	runStartedAt := time.Now()
+	if current.Spec.Export != nil && current.Spec.Export.Dir != "" {
+		runRoot, err := export.InitRunDir(current.Spec.Export.Dir, runStartedAt)
+		if err != nil {
+			logging.Warning("[export] InitRunDir failed; samples will not be persisted to disk:", err)
+		} else {
+			current.ExportRoot = runRoot
+			if err := export.WriteMeta(runRoot, current, current.CandidateNodes, runStartedAt); err != nil {
+				logging.Warning("[export] WriteMeta failed:", err)
+			}
+		}
+	}
 
 	defer func() {
 		if err := kubeapi.UnpinKsvc(ctx, ns, ksvc); err != nil {
@@ -42,6 +59,14 @@ func (nw *NimbusWatcher) runMultiNodeSearch(ctx context.Context, current *nimbus
 		logging.Stage(fmt.Sprintf("[nodes] BinarySearch on node=%s", node))
 		if _, err := algorithm.BinarySearch(ctx, current, node); err != nil {
 			return fmt.Errorf("BinarySearch on %s: %w", node, err)
+		}
+
+		// Write per-node result.json now (not at end-of-loop) so partial
+		// progress survives a mid-loop crash. Non-fatal on failure.
+		if current.ExportRoot != "" {
+			if err := export.WriteResult(current.ExportRoot, node, current.PerNodeResults[node], time.Now()); err != nil {
+				logging.Warning(fmt.Sprintf("[export] WriteResult(%s) failed: %v", node, err))
+			}
 		}
 	}
 	return nil
