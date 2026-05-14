@@ -77,32 +77,36 @@ func BinarySearch(ctx context.Context, current *nimbusevent.NimbusEvent, node st
 
 // probeFn is a phase-agnostic measurement primitive. The starting phase
 // passes a closure around getResptCold; the running phase passes one
-// around getResptWarm. Both return a duration to compare against the
-// previous probe.
-type probeFn func(ctx context.Context, current *nimbusevent.NimbusEvent, cpu string) (time.Duration, error)
+// around getResptWarm. Both return ProbeStats (avg + p90 + p95) for one
+// probe-point's batch of N samples. The convergence math uses
+// stats.Avg; the percentile fields ride along for the recordSample
+// callback to persist.
+type probeFn func(ctx context.Context, current *nimbusevent.NimbusEvent, cpu string) (ProbeStats, error)
 
 // runBinarySearch is the shared convergence loop used by both phases.
 // It walks the [low, high] window, asking probe() for the response time
 // at low, mid, and high, and chooses which bound to move based on the
-// 10% improvement gate. Stops when high - low <= convergenceThresholdMilli.
-// On success it writes setResult(current.High) and returns current.High.
+// 10% improvement gate over avg. Stops when high - low <=
+// convergenceThresholdMilli. On success it writes setResult(current.High)
+// and returns current.High.
 //
-// recordSample is invoked once per probe call with the (cpu, rt) pair
+// recordSample is invoked once per probe call with the (cpu, stats) pair
 // the probe just measured. The per-phase wrapper appends these into the
-// active node's ColdRtSamples / WarmRtSamples slice; runBinarySearch
-// itself stays storage-agnostic.
+// active node's ColdRtSamples / WarmRtSamples slice with all three
+// percentiles preserved; runBinarySearch itself stays storage-agnostic.
 func runBinarySearch(
 	ctx context.Context,
 	current *nimbusevent.NimbusEvent,
 	probe probeFn,
 	setResult func(cpu string),
-	recordSample func(cpu string, rt time.Duration),
+	recordSample func(cpu string, stats ProbeStats),
 ) (string, error) {
-	rtLow, err := probe(ctx, current, current.Low)
+	statsLow, err := probe(ctx, current, current.Low)
 	if err != nil {
 		return "", err
 	}
-	recordSample(current.Low, rtLow)
+	recordSample(current.Low, statsLow)
+	rtLow := statsLow.Avg
 
 	for {
 		shouldContinue, err := kubeapi.IsDiffGreaterThresh(current.Low, current.High, convergenceThresholdMilli)
@@ -123,18 +127,20 @@ func runBinarySearch(
 		}
 		logging.Info("Checking at", midCPU, "CPU ...")
 
-		rtMid, err := probe(ctx, current, midCPU)
+		statsMid, err := probe(ctx, current, midCPU)
 		if err != nil {
 			return "", err
 		}
-		recordSample(midCPU, rtMid)
+		recordSample(midCPU, statsMid)
+		rtMid := statsMid.Avg
 
 		if float64(rtLow-rtMid)/float64(rtLow) > responseTimeImprovementGate {
-			rtHigh, err := probe(ctx, current, current.High)
+			statsHigh, err := probe(ctx, current, current.High)
 			if err != nil {
 				return "", err
 			}
-			recordSample(current.High, rtHigh)
+			recordSample(current.High, statsHigh)
+			rtHigh := statsHigh.Avg
 			if float64(rtMid-rtHigh)/float64(rtMid) > responseTimeImprovementGate {
 				current.Low = midCPU
 				rtLow = rtMid
@@ -178,21 +184,54 @@ func makeSampleSink(current *nimbusevent.NimbusEvent, node, phase, cpu string) S
 	}
 }
 
+// latestSampleAt returns the most-recently-recorded SamplePoint at the
+// given cpu in the supplied list, or nil if none exists. The binary
+// search may re-probe the same cpu in later iterations; the latest entry
+// is the most representative for saturation-stat lookup.
+func latestSampleAt(samples []nimbusevent.SamplePoint, cpu string) *nimbusevent.SamplePoint {
+	for i := len(samples) - 1; i >= 0; i-- {
+		if samples[i].Cpu == cpu {
+			return &samples[i]
+		}
+	}
+	return nil
+}
+
+// rtStatsFromSample copies a SamplePoint's three percentile fields into
+// an RtStats struct. Returns nil if s is nil.
+func rtStatsFromSample(s *nimbusevent.SamplePoint) *nimbusevent.RtStats {
+	if s == nil {
+		return nil
+	}
+	return &nimbusevent.RtStats{
+		AvgMillis: s.RtMillis,
+		P90Millis: s.RtP90Millis,
+		P95Millis: s.RtP95Millis,
+	}
+}
+
 func binarySearchForStartingPhase(ctx context.Context, current *nimbusevent.NimbusEvent, node string) (string, error) {
 	current.Low = current.Spec.ResourcePolicy.ContainerPolicies[0].ResourceRange.Limits.Min
 	current.High = current.Spec.ResourcePolicy.ContainerPolicies[0].ResourceRange.Limits.Max
 
-	probe := func(ctx context.Context, ev *nimbusevent.NimbusEvent, cpu string) (time.Duration, error) {
+	probe := func(ctx context.Context, ev *nimbusevent.NimbusEvent, cpu string) (ProbeStats, error) {
 		return getResptCold(ctx, ev, cpu, makeSampleSink(ev, node, "cold", cpu))
 	}
 	setResult := func(cpu string) {
-		current.PerNodeResults[node].StartingCpu = cpu
-		current.PerNodeResults[node].StartingSaturated = true
+		nr := current.PerNodeResults[node]
+		nr.StartingCpu = cpu
+		nr.StartingSaturated = true
+		nr.StartingRt = rtStatsFromSample(latestSampleAt(nr.ColdRtSamples, cpu))
 	}
-	recordSample := func(cpu string, rt time.Duration) {
+	recordSample := func(cpu string, stats ProbeStats) {
 		current.PerNodeResults[node].ColdRtSamples = append(
 			current.PerNodeResults[node].ColdRtSamples,
-			nimbusevent.SamplePoint{Cpu: cpu, RtMillis: rt.Milliseconds()},
+			nimbusevent.SamplePoint{
+				Cpu:         cpu,
+				RtMillis:    stats.Avg.Milliseconds(),
+				RtP90Millis: stats.P90.Milliseconds(),
+				RtP95Millis: stats.P95.Milliseconds(),
+			},
 		)
 	}
 	cpu, err := runBinarySearch(ctx, current, probe, setResult, recordSample)
@@ -209,17 +248,24 @@ func binarySearchForRunningPhase(ctx context.Context, current *nimbusevent.Nimbu
 	current.Low = runningLow
 	current.High = current.PerNodeResults[node].StartingCpu
 
-	probe := func(ctx context.Context, ev *nimbusevent.NimbusEvent, cpu string) (time.Duration, error) {
+	probe := func(ctx context.Context, ev *nimbusevent.NimbusEvent, cpu string) (ProbeStats, error) {
 		return getResptWarm(ctx, ev, cpu, current.High, makeSampleSink(ev, node, "warm", cpu))
 	}
 	setResult := func(cpu string) {
-		current.PerNodeResults[node].RunningCpu = cpu
-		current.PerNodeResults[node].RunningSaturated = true
+		nr := current.PerNodeResults[node]
+		nr.RunningCpu = cpu
+		nr.RunningSaturated = true
+		nr.RunningRt = rtStatsFromSample(latestSampleAt(nr.WarmRtSamples, cpu))
 	}
-	recordSample := func(cpu string, rt time.Duration) {
+	recordSample := func(cpu string, stats ProbeStats) {
 		current.PerNodeResults[node].WarmRtSamples = append(
 			current.PerNodeResults[node].WarmRtSamples,
-			nimbusevent.SamplePoint{Cpu: cpu, RtMillis: rt.Milliseconds()},
+			nimbusevent.SamplePoint{
+				Cpu:         cpu,
+				RtMillis:    stats.Avg.Milliseconds(),
+				RtP90Millis: stats.P90.Milliseconds(),
+				RtP95Millis: stats.P95.Milliseconds(),
+			},
 		)
 	}
 	cpu, err := runBinarySearch(ctx, current, probe, setResult, recordSample)

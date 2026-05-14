@@ -166,16 +166,19 @@ func WriteMeta(runRoot string, ev *nimbusevent.NimbusEvent, candidateNodes []str
 
 // nodeResultFile is the shape of <runRoot>/<node>/result.json.
 type nodeResultFile struct {
-	Node                  string `json:"node"`
-	StartingCpu           string `json:"startingCpu,omitempty"`
-	RunningCpu            string `json:"runningCpu,omitempty"`
-	ColdPhaseCompletedAt  string `json:"cold_phase_completed_at,omitempty"`
-	WarmPhaseCompletedAt  string `json:"warm_phase_completed_at,omitempty"`
+	Node                 string               `json:"node"`
+	StartingCpu          string               `json:"startingCpu,omitempty"`
+	StartingRt           *nimbusevent.RtStats `json:"startingRt,omitempty"`
+	RunningCpu           string               `json:"runningCpu,omitempty"`
+	RunningRt            *nimbusevent.RtStats `json:"runningRt,omitempty"`
+	ColdPhaseCompletedAt string               `json:"cold_phase_completed_at,omitempty"`
+	WarmPhaseCompletedAt string               `json:"warm_phase_completed_at,omitempty"`
 }
 
 // WriteResult writes <runRoot>/<node>/result.json with the converged CPU
-// values for this node. Overwrites any existing file. completedAt is the
-// timestamp at which the per-node search finished.
+// values + saturated RT stats for this node. Overwrites any existing
+// file. completedAt is the timestamp at which the per-node search
+// finished.
 func WriteResult(runRoot, node string, r *nimbusevent.NodeResult, completedAt time.Time) error {
 	if runRoot == "" || r == nil {
 		return nil
@@ -188,7 +191,9 @@ func WriteResult(runRoot, node string, r *nimbusevent.NodeResult, completedAt ti
 	out := nodeResultFile{
 		Node:        node,
 		StartingCpu: r.StartingCpu,
+		StartingRt:  r.StartingRt,
 		RunningCpu:  r.RunningCpu,
+		RunningRt:   r.RunningRt,
 	}
 	// Use the same completedAt for both phases — we write at end-of-node, not
 	// end-of-phase. Refining this would require a second timestamp arg; not

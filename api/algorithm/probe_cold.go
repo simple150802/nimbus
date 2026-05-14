@@ -33,13 +33,13 @@ const (
 type SampleSink func(rt time.Duration)
 
 // getResptCold runs measurement.coldSamples cold-start probes at cpuValue
-// and returns the mean response time. When onSample is non-nil, it is
+// and returns ProbeStats {Avg, P90, P95}. When onSample is non-nil, it is
 // invoked once per individual sample as soon as the measurement is taken
 // (used by the export pipeline; see internal/export). The StartupCPUBoost
 // CR is created once (so each fresh pod is injected with cpuValue by the
 // upstream webhook) and torn down on return; the resource monitor is
 // started per sample only during triggerHttp.
-func getResptCold(ctx context.Context, event *nimbusevent.NimbusEvent, cpuValue string, onSample SampleSink) (time.Duration, error) {
+func getResptCold(ctx context.Context, event *nimbusevent.NimbusEvent, cpuValue string, onSample SampleSink) (ProbeStats, error) {
 	logging.Stage(fmt.Sprintf("[COLD] probe starting — cpu=%s ns=%s", cpuValue, event.Metadata.Namespace))
 	labelSelector := buildLabelSelector(event)
 
@@ -48,10 +48,10 @@ func getResptCold(ctx context.Context, event *nimbusevent.NimbusEvent, cpuValue 
 	})
 	if err != nil {
 		logging.Failure("[COLD] failed to list deployments:", err)
-		return 0, err
+		return ProbeStats{}, err
 	}
 	if len(deployments.Items) == 0 {
-		return 0, fmt.Errorf("no deployments match selector %q in namespace %q",
+		return ProbeStats{}, fmt.Errorf("no deployments match selector %q in namespace %q",
 			labelSelector, event.Metadata.Namespace)
 	}
 
@@ -66,22 +66,25 @@ func getResptCold(ctx context.Context, event *nimbusevent.NimbusEvent, cpuValue 
 
 	targetKsvc := event.Selector.MatchExpressions[0].Values[0]
 
-	var sum time.Duration
+	// Buffer the N raw samples locally so we can compute percentiles at
+	// end-of-loop. Released when this function returns (peak ~N*8 bytes).
+	samples := make([]time.Duration, 0, n)
 	for i := 0; i < n; i++ {
 		rt, err := coldSampleWithStuckRecovery(ctx, event, labelSelector, targetKsvc, i+1, n)
 		if err != nil {
-			return 0, err
+			return ProbeStats{}, err
 		}
 		logging.Normal(fmt.Sprintf("[COLD] sample %d/%d: cpu=%s rt=%s", i+1, n, cpuValue, rt))
 		if onSample != nil {
 			onSample(rt)
 		}
-		sum += rt
+		samples = append(samples, rt)
 	}
 
-	avg := sum / time.Duration(n)
-	logging.Normal(fmt.Sprintf("[COLD] probe complete — cpu=%s avg=%s over %d samples", cpuValue, avg, n))
-	return avg, nil
+	stats := computeProbeStats(samples)
+	logging.Normal(fmt.Sprintf("[COLD] probe complete — cpu=%s avg=%s p90=%s p95=%s over %d samples",
+		cpuValue, stats.Avg, stats.P90, stats.P95, n))
+	return stats, nil
 }
 
 // coldSampleWithStuckRecovery runs one cold-start sample with auto-recovery:

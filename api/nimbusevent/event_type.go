@@ -56,28 +56,52 @@ type NimbusEvent struct {
 // granularity. Runtime-only (json:"-"); recomputed from CPU emptiness on
 // load so they don't need to round-trip through .status.
 //
-// ColdRtSamples / WarmRtSamples capture every (cpu, rt) probe point the
+// ColdRtSamples / WarmRtSamples capture every (cpu, stats) probe point the
 // binary search visited, in ascending-cpu order. The online stage's
-// algorithms (algorithm.md §2.2.3) consume these as the per-pod RT_i(x)
-// curve via piecewise-linear interpolation. One SamplePoint per probe
-// call (cpu = the CPU just probed, rt = the average across that probe's
-// coldSamples / warmSamples). Sorted at end-of-phase by ascending cpu.
+// algorithms consume these as the per-pod RT_i(x) curve via piecewise-
+// linear interpolation. One SamplePoint per probe call (cpu = the CPU
+// just probed; rt = stats across that probe's coldSamples/warmSamples,
+// computed at end-of-loop). Sorted at end-of-phase by ascending cpu.
+//
+// StartingRt / RunningRt are the *saturated* RT stats — i.e., the per-
+// percentile RT measured at the converged CPU value for each phase. They
+// are nil until the corresponding phase saturates, then populated by the
+// binary-search setResult callback by looking up the latest probe at the
+// converged CPU. Useful for SLO comparisons (e.g. "at the recommended
+// CPU, what's the p95 latency?") without re-deriving from the sample
+// list.
 type NodeResult struct {
 	StartingCpu       string        `json:"startingCpu,omitempty"`
+	StartingRt        *RtStats      `json:"startingRt,omitempty"`
 	RunningCpu        string        `json:"runningCpu,omitempty"`
+	RunningRt         *RtStats      `json:"runningRt,omitempty"`
 	ColdRtSamples     []SamplePoint `json:"coldRtSamples,omitempty"`
 	WarmRtSamples     []SamplePoint `json:"warmRtSamples,omitempty"`
 	StartingSaturated bool          `json:"-"`
 	RunningSaturated  bool          `json:"-"`
 }
 
-// SamplePoint is one (cpu, rt) measurement from a single binary-search
-// probe. Cpu is a Kubernetes-quantity string ("706m", "1500m"); RtMillis
-// is the response time in milliseconds (int64 instead of time.Duration
-// so the wire form reads cleanly via `kubectl get -o yaml`).
+// RtStats summarises a probe's measured response times across its
+// individual samples. AvgMillis is the arithmetic mean (drives the
+// binary-search convergence math); P90Millis / P95Millis are nearest-rank
+// percentiles for downstream SLO analysis.
+type RtStats struct {
+	AvgMillis int64 `json:"avgMillis"`
+	P90Millis int64 `json:"p90Millis"`
+	P95Millis int64 `json:"p95Millis"`
+}
+
+// SamplePoint is one (cpu, rt-stats) measurement from a single binary-
+// search probe. Cpu is a Kubernetes-quantity string ("706m", "1500m");
+// RtMillis is the mean RT in milliseconds (kept for backward compatibility
+// with existing consumers); RtP90Millis / RtP95Millis carry the same-
+// probe percentiles. All values int64 so the wire form reads cleanly via
+// `kubectl get -o yaml`.
 type SamplePoint struct {
-	Cpu      string `json:"cpu"`
-	RtMillis int64  `json:"rtMillis"`
+	Cpu         string `json:"cpu"`
+	RtMillis    int64  `json:"rtMillis"`
+	RtP90Millis int64  `json:"rtP90Millis,omitempty"`
+	RtP95Millis int64  `json:"rtP95Millis,omitempty"`
 }
 
 // NimbusStatus reflects the Nimbus CRD's .status subresource. Field names must

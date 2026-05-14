@@ -212,15 +212,36 @@ spec:
                       startingCpu:
                         description: Finalized CPU limit for the startup phase on this node.
                         type: string
+                      startingRt:
+                        description: |
+                          Saturated RT stats — the (avg, p90, p95) measured at
+                          the converged startingCpu. Populated when the cold
+                          phase saturates; omitted otherwise.
+                        type: object
+                        properties:
+                          avgMillis: { type: integer, minimum: 0 }
+                          p90Millis: { type: integer, minimum: 0 }
+                          p95Millis: { type: integer, minimum: 0 }
                       runningCpu:
                         description: Finalized CPU limit for the running phase on this node.
                         type: string
+                      runningRt:
+                        description: |
+                          Saturated RT stats — the (avg, p90, p95) measured at
+                          the converged runningCpu. Populated when the warm
+                          phase saturates; omitted otherwise.
+                        type: object
+                        properties:
+                          avgMillis: { type: integer, minimum: 0 }
+                          p90Millis: { type: integer, minimum: 0 }
+                          p95Millis: { type: integer, minimum: 0 }
                       coldRtSamples:
                         description: |
-                          (cpu, rt) points the binary search visited during the
-                          starting phase on this node, ordered by ascending cpu.
-                          Consumed by the online stage to fit RT_i(x) without
-                          re-probing.
+                          (cpu, rt-stats) points the binary search visited during
+                          the starting phase on this node, ordered by ascending
+                          cpu. rtMillis is the mean across the probe's samples;
+                          rtP90Millis / rtP95Millis are nearest-rank percentiles
+                          for the same probe. Consumed by the online stage.
                         type: array
                         items:
                           type: object
@@ -232,10 +253,17 @@ spec:
                             rtMillis:
                               type: integer
                               minimum: 0
+                            rtP90Millis:
+                              type: integer
+                              minimum: 0
+                            rtP95Millis:
+                              type: integer
+                              minimum: 0
                       warmRtSamples:
                         description: |
-                          (cpu, rt) points the binary search visited during the
-                          running phase on this node, ordered by ascending cpu.
+                          (cpu, rt-stats) points the binary search visited during
+                          the running phase on this node, ordered by ascending
+                          cpu. Same shape as coldRtSamples.
                         type: array
                         items:
                           type: object
@@ -245,5 +273,11 @@ spec:
                               type: string
                               pattern: "^(\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))))?$"
                             rtMillis:
+                              type: integer
+                              minimum: 0
+                            rtP90Millis:
+                              type: integer
+                              minimum: 0
+                            rtP95Millis:
                               type: integer
                               minimum: 0

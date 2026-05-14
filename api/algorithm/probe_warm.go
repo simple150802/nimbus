@@ -14,17 +14,18 @@ import (
 
 // getResptWarm patches the ksvc CPU to cpuValue, waits for scale-to-zero,
 // fires one warmup curl to bring a fresh pod up, then runs
-// measurement.warmSamples timed curls and returns the mean. cpuCold is the
-// boost CPU used during the cold-start of the warmup pod (the upstream
-// webhook applies it via the StartupCPUBoost CR). When onSample is non-nil,
-// it is invoked once per individual timed sample (NOT the warmup curl) so
-// the export pipeline can stream raw rows; nil disables the side-channel.
+// measurement.warmSamples timed curls and returns ProbeStats {Avg, P90,
+// P95}. cpuCold is the boost CPU used during the cold-start of the warmup
+// pod (the upstream webhook applies it via the StartupCPUBoost CR). When
+// onSample is non-nil, it is invoked once per individual timed sample
+// (NOT the warmup curl) so the export pipeline can stream raw rows; nil
+// disables the side-channel.
 //
 // maxScale=1 is set once by BinarySearch and not touched here.
 //
 // No stuck-pod auto-recovery: a warm probe failure aborts the whole search
 // so RunWorker can retry on the next tick.
-func getResptWarm(ctx context.Context, event *nimbusevent.NimbusEvent, cpuValue string, cpuCold string, onSample SampleSink) (time.Duration, error) {
+func getResptWarm(ctx context.Context, event *nimbusevent.NimbusEvent, cpuValue string, cpuCold string, onSample SampleSink) (ProbeStats, error) {
 	logging.Stage(fmt.Sprintf("[WARM] probe starting — cpu=%s cold_boost=%s ns=%s", cpuValue, cpuCold, event.Metadata.Namespace))
 	labelSelector := buildLabelSelector(event)
 
@@ -33,10 +34,10 @@ func getResptWarm(ctx context.Context, event *nimbusevent.NimbusEvent, cpuValue 
 	})
 	if err != nil {
 		logging.Failure("[WARM] failed to list deployments:", err)
-		return 0, err
+		return ProbeStats{}, err
 	}
 	if len(deployments.Items) == 0 {
-		return 0, fmt.Errorf("no deployments match selector %q in namespace %q",
+		return ProbeStats{}, fmt.Errorf("no deployments match selector %q in namespace %q",
 			labelSelector, event.Metadata.Namespace)
 	}
 
@@ -51,12 +52,12 @@ func getResptWarm(ctx context.Context, event *nimbusevent.NimbusEvent, cpuValue 
 	targetKsvc := event.Selector.MatchExpressions[0].Values[0]
 	if err := kubeapi.PatchResourceLimits(ctx, event.Metadata.Namespace, targetKsvc, cpuValue); err != nil {
 		logging.Failure("[WARM] failed to patch ksvc CPU limit:", err)
-		return 0, err
+		return ProbeStats{}, err
 	}
 
 	logging.Info(fmt.Sprintf("[WARM] new ksvc revision rolled for %s/%s", event.Metadata.Namespace, targetKsvc))
 	if err := waitForScaleToZero(ctx, phaseWarm, event.Metadata.Namespace, labelSelector); err != nil {
-		return 0, err
+		return ProbeStats{}, err
 	}
 
 	kubeapi.CreateStartupCPUBoost(ctx, event, cpuCold)
@@ -68,7 +69,7 @@ func getResptWarm(ctx context.Context, event *nimbusevent.NimbusEvent, cpuValue 
 
 	logging.Info("[WARM] warmup curl before timed samples")
 	if _, err := triggerHttp(ctx, phaseWarm, event.Spec.DurationPolicy.ApiCondition); err != nil {
-		return 0, err
+		return ProbeStats{}, err
 	}
 
 	n := event.Spec.Measurement.WarmSamples
@@ -77,26 +78,29 @@ func getResptWarm(ctx context.Context, event *nimbusevent.NimbusEvent, cpuValue 
 	}
 	logging.Info(fmt.Sprintf("[WARM] samples to collect: %d", n))
 
-	var sum time.Duration
+	// Buffer the N timed samples locally so we can compute percentiles at
+	// end-of-loop. Released when this function returns (peak ~N*8 bytes).
+	samples := make([]time.Duration, 0, n)
 	for i := 0; i < n; i++ {
 		rt, err := triggerHttp(ctx, phaseWarm, event.Spec.DurationPolicy.ApiCondition)
 		if err != nil {
-			return 0, err
+			return ProbeStats{}, err
 		}
 		logging.Normal(fmt.Sprintf("[WARM] sample %d/%d: cpu=%s rt=%s", i+1, n, cpuValue, rt))
 		if onSample != nil {
 			onSample(rt)
 		}
-		sum += rt
+		samples = append(samples, rt)
 		if i < n-1 {
 			logging.Normal(fmt.Sprintf("[WARM] cool-down %s before next sample", interSampleSleep))
 			if err := sleepCtx(ctx, interSampleSleep); err != nil {
-				return 0, err
+				return ProbeStats{}, err
 			}
 		}
 	}
 
-	avg := sum / time.Duration(n)
-	logging.Normal(fmt.Sprintf("[WARM] probe complete — cpu=%s avg=%s over %d samples", cpuValue, avg, n))
-	return avg, nil
+	stats := computeProbeStats(samples)
+	logging.Normal(fmt.Sprintf("[WARM] probe complete — cpu=%s avg=%s p90=%s p95=%s over %d samples",
+		cpuValue, stats.Avg, stats.P90, stats.P95, n))
+	return stats, nil
 }

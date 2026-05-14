@@ -3,6 +3,8 @@ package algorithm
 import (
 	"context"
 	"fmt"
+	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -12,6 +14,58 @@ import (
 	"nimbus/api/logging"
 	"nimbus/api/nimbusevent"
 )
+
+// ProbeStats summarises a probe's individual-sample response times.
+// Avg is the arithmetic mean (drives binary-search convergence today);
+// P90 / P95 are nearest-rank percentiles for SLO analysis. Computed by
+// computeProbeStats from the per-sample slice held inside getResptCold /
+// getResptWarm — never escapes the probe function.
+type ProbeStats struct {
+	Avg time.Duration
+	P90 time.Duration
+	P95 time.Duration
+}
+
+// computeProbeStats returns the mean and nearest-rank p90 / p95 over a
+// non-empty sample list. samples is left untouched (the caller's slice
+// order is preserved); the function takes a defensive copy before
+// sorting. Defined as a free helper so probe_cold and probe_warm share
+// one implementation.
+//
+// Nearest-rank percentile: rank = ceil(q · N), 1-based.
+//   N=3,  q=0.9  → rank 3 → samples[2]
+//   N=3,  q=0.95 → rank 3 → samples[2]
+//   N=10, q=0.9  → rank 9 → samples[8]
+//   N=10, q=0.95 → rank 10 → samples[9]
+// For N=1, P90 = P95 = the single sample.
+func computeProbeStats(samples []time.Duration) ProbeStats {
+	if len(samples) == 0 {
+		return ProbeStats{}
+	}
+	sorted := append([]time.Duration(nil), samples...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+
+	var sum time.Duration
+	for _, s := range samples {
+		sum += s
+	}
+
+	n := float64(len(sorted))
+	idx90 := int(math.Ceil(0.90*n)) - 1
+	idx95 := int(math.Ceil(0.95*n)) - 1
+	if idx90 < 0 {
+		idx90 = 0
+	}
+	if idx95 < 0 {
+		idx95 = 0
+	}
+
+	return ProbeStats{
+		Avg: sum / time.Duration(len(samples)),
+		P90: sorted[idx90],
+		P95: sorted[idx95],
+	}
+}
 
 // Re-export the kubeconfig globals so the rest of the package can use the
 // short names without prefixing every call.
