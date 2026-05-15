@@ -64,9 +64,14 @@ func InitRunDir(baseDir string, runStartedAt time.Time) (string, error) {
 // Index is monotonic per file — on append, the next index is one past the
 // existing row count (1-based).
 //
+// The rt parameter is the raw time.Duration; the CSV value is formatted
+// as float64 milliseconds with 3 decimal places (microsecond precision)
+// to preserve sub-millisecond detail beyond what time.Duration.Milliseconds
+// would truncate.
+//
 // The file is opened in append mode for one write and closed immediately
-// (streaming write per Option B; no slice ever holds raw samples in RAM).
-func AppendSample(runRoot, node, phase, cpu string, rtMillis int64) error {
+// (streaming write; no slice ever holds raw samples in RAM).
+func AppendSample(runRoot, node, phase, cpu string, rt time.Duration) error {
 	if runRoot == "" {
 		return nil // export disabled — silent no-op
 	}
@@ -95,7 +100,10 @@ func AppendSample(runRoot, node, phase, cpu string, rtMillis int64) error {
 			return fmt.Errorf("write header to %s: %w", path, err)
 		}
 	}
-	if _, err := fmt.Fprintf(f, "%d,%d\n", idx, rtMillis); err != nil {
+	// Float ms with 3 decimal places = µs precision; preserves all useful
+	// information in the time.Duration without writing huge ns ints.
+	rtMillis := float64(rt) / float64(time.Millisecond)
+	if _, err := fmt.Fprintf(f, "%d,%.3f\n", idx, rtMillis); err != nil {
 		return fmt.Errorf("write row to %s: %w", path, err)
 	}
 	return nil

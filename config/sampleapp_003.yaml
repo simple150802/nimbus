@@ -11,8 +11,8 @@ spec:
         autoscaling.knative.dev/min-scale: '0'
         autoscaling.knative.dev/max-scale: '1'
     spec:
-    #   nodeSelector:
-    #     kubernetes.io/hostname: "worker"
+      nodeSelector:
+        kubernetes.io/hostname: "worker"
       containers:
         - image: docker.io/lazyken/measure-yolo:v1@sha256:b89f025e9b7bd7181ba51cf7d6006f6b550d719b0fea578309cbdbd2b9e9a884
           resources:

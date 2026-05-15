@@ -1,0 +1,45 @@
+# Nimbus that runs the binary search and exports per-probe samples to disk.
+# Use this manifest the FIRST time you measure a workload — the controller
+# performs the full cold + warm search for each candidate node and writes
+# results to <export.dir>/<run-start-timestamp>/.
+#
+# Apply:
+#   kubectl apply -f config/my-boost-export.yaml
+#
+# To re-use the resulting data instead of re-measuring on a subsequent
+# apply, switch to config/my-boost-preload.yaml and point its
+# preMeasured.loadFromDir at the timestamp directory this run produced.
+apiVersion: lazyken.io/v1alpha1
+kind: Nimbus
+metadata:
+  name: boost-001
+  namespace: serverless
+selector:
+  matchExpressions:
+  - key: serving.knative.dev/service
+    operator: In
+    values: ["measure-yolo-001", "measure-yolo-002", "measure-yolo-003"]
+spec:
+  # Write per-probe raw TTFB CSVs + meta.json + per-node result.json under
+  # <dir>/<run-start-timestamp>/. Path is relative to the controller's
+  # working directory.
+  export:
+    dir: "../results"
+
+  # Cold samples are expensive (each forces a scale-to-zero before a fresh
+  # cold start). Omit `measurement` entirely to accept the CRD defaults
+  # (1 cold sample, 10 warm samples).
+  measurement:
+    coldSamples: 3
+    warmSamples: 3
+  resourcePolicy:
+    containerPolicies:
+    - containerName: user-container
+      resourceRange:
+        limits:
+          min: "300m"
+          max: "1000m"
+  durationPolicy:
+    apiCondition:
+      url: "http://measure-yolo-001.serverless.svc.cluster.local/status"
+      response: "READY"

@@ -2,6 +2,7 @@ package watcher
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"nimbus/api/logging"
 	"nimbus/api/nimbusevent"
 	"nimbus/internal/export"
+	"nimbus/internal/preMeasured"
 )
 
 // runMultiNodeSearch loops the binary search over each candidate node.
@@ -101,6 +103,68 @@ func loadPerNodeFromStatus(current *nimbusevent.NimbusEvent) {
 		}
 	}
 	recomputeAllSaturated(current)
+}
+
+// applyPreMeasured overlays values from spec.preMeasured.loadFromDir onto
+// PerNodeResults for any candidate node that wasn't already saturated by
+// loadPerNodeFromStatus. Status wins over preMeasured (preMeasured is a
+// seed, not an override). Returns true iff at least one candidate node
+// gained saturation from the load — the caller uses this to decide
+// whether to persist status when the fast path subsequently fires.
+//
+// No-op when spec.preMeasured is nil or its loadFromDir is empty.
+// loadFromDir read failures are logged as warnings and treated as
+// "no data" — the search falls through to the slow path.
+func applyPreMeasured(current *nimbusevent.NimbusEvent) bool {
+	if current.Spec.PreMeasured == nil || current.Spec.PreMeasured.LoadFromDir == "" {
+		return false
+	}
+	dir := current.Spec.PreMeasured.LoadFromDir
+
+	loaded, err := preMeasured.ReadRunDir(dir)
+	if err != nil {
+		if errors.Is(err, preMeasured.ErrDirNotFound) {
+			logging.Warning(fmt.Sprintf("[preMeasured] %s: directory not found — falling through to search", dir))
+		} else {
+			logging.Warning(fmt.Sprintf("[preMeasured] %s: load failed: %v", dir, err))
+		}
+		return false
+	}
+
+	contributed := false
+	for _, node := range current.CandidateNodes {
+		existing := current.PerNodeResults[node]
+		// Skip nodes already saturated from status — status wins.
+		if existing != nil && existing.StartingSaturated && existing.RunningSaturated {
+			continue
+		}
+		preLoaded, ok := loaded[node]
+		if !ok {
+			continue // no preMeasured data for this candidate node
+		}
+
+		// Overlay. We re-use existing (and any partial sample slices it had)
+		// rather than overwriting, in case future iterations decide to keep
+		// partially-saturated state. Today both phases come from the load.
+		if existing == nil {
+			current.PerNodeResults[node] = preLoaded
+		} else {
+			existing.StartingCpu = preLoaded.StartingCpu
+			existing.StartingRt = preLoaded.StartingRt
+			existing.StartingSaturated = preLoaded.StartingSaturated
+			existing.RunningCpu = preLoaded.RunningCpu
+			existing.RunningRt = preLoaded.RunningRt
+			existing.RunningSaturated = preLoaded.RunningSaturated
+		}
+		contributed = true
+		logging.Info(fmt.Sprintf("[preMeasured] %s: loaded node=%s starting=%s running=%s",
+			dir, node, preLoaded.StartingCpu, preLoaded.RunningCpu))
+	}
+
+	if contributed {
+		recomputeAllSaturated(current)
+	}
+	return contributed
 }
 
 // recomputeAllSaturated maintains the invariant that current.AllSaturated

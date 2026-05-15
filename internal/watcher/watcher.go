@@ -132,10 +132,29 @@ func (nw *NimbusWatcher) RunWorker(ctx context.Context) {
 		// is fully saturated, in which case we skip the search entirely.
 		loadPerNodeFromStatus(current)
 
+		// Overlay spec.preMeasured.loadFromDir for any candidate node that
+		// status didn't already saturate. Status wins over preMeasured.
+		// preMeasuredContributed is true iff this overlay added saturation
+		// for at least one node — used below to persist status when the
+		// fast path fires from a preMeasured-only source.
+		preMeasuredContributed := applyPreMeasured(current)
+
 		if current.AllSaturated {
 			logging.Info(fmt.Sprintf("Skipping binary search — all %d candidate node(s) saturated: %s/%s",
 				len(current.CandidateNodes),
 				current.Metadata.Namespace, current.Metadata.Name))
+			// When preMeasured was the source of saturation (status was
+			// empty or partial before the overlay), persist what NIMBUS is
+			// about to apply so `kubectl get nimbus -o yaml` reflects it.
+			// Skip when preMeasured didn't contribute — status is already
+			// authoritative and rewriting it would be a no-op churn.
+			if preMeasuredContributed {
+				if err := kubeapi.WriteNimbusStatus(ctx,
+					current.Metadata.Namespace, current.Metadata.Name,
+					current.PerNodeResults); err != nil {
+					logging.Failure("Failed to persist Nimbus status (preMeasured fast path):", err)
+				}
+			}
 		} else {
 			logging.Stage("STEP PROCESSING:", current.Metadata.Namespace, current.Metadata.Name)
 			if err := nw.runMultiNodeSearch(ctx, current); err != nil {

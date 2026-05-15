@@ -62,6 +62,29 @@ spec:
                       type: string
                       minLength: 1
                       pattern: '^[A-Za-z0-9_./-]+$'
+                preMeasured:
+                  description: |
+                    Optional preload of a previous run's results. When set
+                    and loadFromDir points at an export-format directory
+                    (the same layout written by spec.export), the controller
+                    reads each <node>/result.json and seeds startingCpu /
+                    runningCpu / startingRt / runningRt for that node.
+                    Saturated nodes are skipped by the binary search; only
+                    unsaturated nodes get re-measured. Status overlays
+                    preMeasured — values already in .status.perNode win over
+                    the loaded data.
+                  type: object
+                  required: [loadFromDir]
+                  properties:
+                    loadFromDir:
+                      description: |
+                        Filesystem path to a previously-exported run
+                        directory (typically results/<timestamp>/). Same
+                        path-resolution rules as spec.export.dir: relative
+                        against cwd, absolute used as-is, '..' allowed.
+                      type: string
+                      minLength: 1
+                      pattern: '^[A-Za-z0-9_./-]+$'
                 measurement:
                   description: |
                     Controls how many samples the controller averages per

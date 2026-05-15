@@ -153,6 +153,7 @@ type NimbusSpec struct {
 	DurationPolicy DurationPolicy    `json:"durationPolicy"`
 	Measurement    MeasurementPolicy `json:"measurement,omitempty"`
 	Export         *ExportSpec       `json:"export,omitempty"`
+	PreMeasured    *PreMeasuredSpec  `json:"preMeasured,omitempty"`
 }
 
 // ExportSpec configures filesystem export of raw per-probe samples.
@@ -161,6 +162,16 @@ type NimbusSpec struct {
 // meta.json, per-node result.json, and per-probe <cpu>.csv files there.
 type ExportSpec struct {
 	Dir string `json:"dir"`
+}
+
+// PreMeasuredSpec configures one-time loading of a previously-exported
+// run as the starting state of a fresh Nimbus. When LoadFromDir is set,
+// the controller reads <dir>/<node>/result.json for each node referenced
+// in the candidate set and pre-populates PerNodeResults; saturated nodes
+// skip the binary search. Status overlays preMeasured — values already
+// in .status.perNode win over the loaded data.
+type PreMeasuredSpec struct {
+	LoadFromDir string `json:"loadFromDir"`
 }
 
 // MeasurementPolicy controls how many samples the controller averages per

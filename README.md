@@ -51,14 +51,14 @@ Each per-node search runs the same two phases:
 
 - `low := spec.resourcePolicy.containerPolicies[0].resourceRange.limits.min`
 - `high := spec.resourcePolicy.containerPolicies[0].resourceRange.limits.max`
-- Each probe creates a `StartupCPUBoost` CR at the candidate CPU, force-deletes the existing pod, waits for scale-to-zero, and measures the cold-start response time of `durationPolicy.apiCondition.url`.
+- Each probe creates a `StartupCPUBoost` CR at the candidate CPU, force-deletes the existing pod, waits for scale-to-zero, triggers `coldSamples` cold-start requests against `durationPolicy.apiCondition.url`, and reports the **p95** of those response times. (The shipping code currently reports the *mean*; switching to p95 is a planned tightening of the SLO claim — see [algorithm.md §3.3](algorithm.md#33-the-probes--n-samples-p95-aggregation).)
 - The midpoint is treated as the new `high` (or `low` if response time improved by > 10%) until `high - low ≤ 100m`.
 - The converged `high` is written to `.status.perNode[<node>].startingCpu`.
 
 ### Running phase
 
 - `low := spec.min - 50m`, `high := <this-node>.startingCpu`.
-- Probes use the warm path: patch the ksvc to the candidate CPU, wait for the new revision to scale to zero, trigger N warm requests, average the response times.
+- Probes use the warm path: patch the ksvc to the candidate CPU, wait for the new revision to scale to zero, trigger `warmSamples` warm requests, and report the **p95** of those response times. (Currently mean, see note above.)
 - Same convergence rule (`high - low ≤ 100m`).
 - The converged `high` is written to `.status.perNode[<node>].runningCpu`.
 
@@ -81,7 +81,12 @@ The flow chart for the algorithm:
 | Short name | `nb` |
 | Scope | Namespaced |
 
-Sample manifest (also in [config/my-boost.yaml](config/my-boost.yaml)):
+Two ready-to-apply sample manifests live under [config/](config/):
+
+- [`config/my-boost-export.yaml`](config/my-boost-export.yaml) — runs the binary search and writes per-probe samples to `../results/<timestamp>/`
+- [`config/my-boost-preload.yaml`](config/my-boost-preload.yaml) — loads a previously-exported run and skips the binary search
+
+The shared shape:
 
 ```yaml
 apiVersion: lazyken.io/v1alpha1
@@ -97,7 +102,8 @@ selector:
 spec:
   # measurement is optional. Defaults: coldSamples=1, warmSamples=10.
   # Cold samples are expensive — each forces a scale-to-zero before a
-  # fresh cold start.
+  # fresh cold start. For an SLO-claim experiment use coldSamples ≥ 5
+  # and warmSamples ≥ 20 (see algorithm.md §3.7).
   measurement:
     coldSamples: 1
     warmSamples: 10
@@ -119,8 +125,8 @@ spec:
 - **`selector.matchExpressions`** — the controller currently only honors the first entry, only the `In` operator, and treats `values` as a **literal list of Knative service names**, not as a label selector in the general Kubernetes sense. The CRD enforces this with an `enum: [In]` constraint.
 - **`spec.resourcePolicy.containerPolicies[0]`** — only the first container policy is read; `containerName` must match the user-container name inside the Knative pod (typically `user-container`).
 - **`spec.resourcePolicy.containerPolicies[0].resourceRange.limits.{min,max}`** — search bounds. Standard Kubernetes CPU quantities (`"200m"`, `"2"`, `"1500m"`).
-- **`spec.measurement.coldSamples`** — number of cold-start samples per probe (default 1, minimum 1). Each sample = one full scale-to-zero + cold-start cycle.
-- **`spec.measurement.warmSamples`** — number of warm-request samples per probe (default 10). Cheap.
+- **`spec.measurement.coldSamples`** — number of cold-start samples per probe (default 1, minimum 1). Each sample = one full scale-to-zero + cold-start cycle, ~30–90 s wall-clock. **Recommended:** 5 (target: 10) for an SLO-claim experiment; the bare floor is 3, below which "p95" is just the single measurement and any kubelet hiccup defines the curve. See [algorithm.md §3.7](algorithm.md#37-how-many-samples-per-probe).
+- **`spec.measurement.warmSamples`** — number of warm-request samples per probe (default 10). Each sample is ~10 s. **Recommended:** 20 (target: 30) — at `N < 20`, "p95" mathematically reduces to "max of N", so this is the smallest `N` at which the percentile is meaningful.
 - **`spec.durationPolicy.apiCondition.{url,response}`** — only `apiCondition` is implemented (the upstream project's `fixed` and `podCondition` policies are not honored). The controller GETs `url` until the body contains `response`.
 - **`status.perNode`** — a map keyed by node name. Each entry holds:
   - `startingCpu` / `runningCpu` — the converged values used at apply time (collapsed to the cluster-wide max).
@@ -136,6 +142,40 @@ boost-001   map[master:map[startingCpu:706m runningCpu:219m] ...]    2m
 ```
 
 (The raw map renders awkwardly in the printer column. Use `-o yaml` for a clean read of `.status.perNode`.)
+
+### Exporting per-probe samples
+
+Optional: set `spec.export.dir` to have the controller write raw response-time samples to disk as the binary search runs.
+
+```yaml
+spec:
+  export:
+    dir: "./results"                # or an absolute path like "/var/nimbus/results"
+  resourcePolicy: { ... }
+  durationPolicy: { ... }
+```
+
+Output tree (one timestamped subdirectory per search run):
+
+```
+results/2026-05-08T14-23-11/
+├── meta.json                         # Nimbus spec snapshot + candidate nodes
+├── master/
+│   ├── cold/{300m.csv, 650m.csv, 706m.csv}   # one row per raw sample
+│   ├── warm/{250m.csv, 219m.csv}
+│   └── result.json                   # converged {startingCpu, runningCpu}
+└── worker/
+    └── ...
+```
+
+Each `<cpu>.csv` is `index,rt_millis` only — three rows when `measurement.coldSamples: 3`, appended monotonically if the search re-probes the same CPU. Node / phase / cpu are encoded in the path, not the row. Load into pandas:
+
+```python
+import pandas as pd, glob
+df = pd.concat(pd.read_csv(f).assign(file=f) for f in glob.glob("results/*/master/cold/*.csv"))
+```
+
+Omit `spec.export` to disable export entirely (legacy behaviour, no files written).
 
 ---
 
@@ -166,12 +206,21 @@ kubectl apply -f config/sampleapp.yaml
 # 3. Start the controller
 go run ./cmd
 
-# 4. In another terminal, apply a Nimbus
-kubectl apply -f config/my-boost.yaml
+# 4. In another terminal, apply a Nimbus that runs the binary search and
+#    exports samples to ../results/<timestamp>/
+kubectl apply -f config/my-boost-export.yaml
 
 # 5. Watch the search progress in the controller terminal
 # 6. When the search converges, per-node finalized values are visible:
 kubectl get nimbus -n serverless -o yaml | grep -A20 'status:'
+
+# 7. (Optional) Re-use the exported run: delete the Nimbus, point the
+#    preload manifest's loadFromDir at the resulting results/<ts>/, and
+#    re-apply. The controller skips the binary search and applies the
+#    loaded CPU values directly.
+kubectl delete nimbus boost-001 -n serverless
+$EDITOR config/my-boost-preload.yaml         # set loadFromDir
+kubectl apply -f config/my-boost-preload.yaml
 ```
 
 To re-run the search after completion, clear the status:
@@ -225,6 +274,6 @@ The controller writes colored, tagged output via `api/logging`:
 - A Nimbus CRD currently programs **one ksvc, one container policy** — the controller indexes `[0]` for both `matchExpressions` and `containerPolicies` and assumes the container is named `user-container`.
 - The `durationPolicy` only supports `apiCondition`. The `fixed` and `podCondition` policies present in the upstream `StartupCPUBoost` CRD are not honored here.
 - Cold probes can take a long time at low CPU values; the search auto-aborts an individual probe after 2 minutes and retries up to 3 times. Warm probes have no per-sample retry budget yet — a flaky network kills the whole search.
-- **Multi-node measurement** lands per-node values into `.status.perNode`, but at apply time the per-node values are collapsed to the cluster-wide max for a single ksvc CPU limit. Per-pod, per-node CPU (Phase 3 — in-place pod resize on k8s 1.33+) is designed but not implemented; see [multiple_nodes.md](multiple_nodes.md) §4.
+- **Multi-node measurement** lands per-node values into `.status.perNode`, but at apply time the per-node values are collapsed to the cluster-wide max for a single ksvc CPU limit. Per-pod, per-node CPU via k8s 1.33's `/resize` subresource is designed but not implemented; see [online_plan.md](online_plan.md) §3.4 + Phase F'.
 - No metrics / tracing — observability is print-only at the moment.
 - The intended environment is a **local dev cluster**; the project doesn't ship RBAC manifests, a populated Dockerfile, or CI.

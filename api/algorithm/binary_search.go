@@ -173,12 +173,14 @@ func sortSamplesByCpu(samples []nimbusevent.SamplePoint) {
 // makeSampleSink returns a SampleSink that appends one CSV row per call
 // to <ExportRoot>/<node>/<phase>/<cpu>.csv. Returns nil when ExportRoot is
 // empty (export disabled), so getResptCold/getResptWarm skip the call.
+// The full time.Duration is forwarded so AppendSample can write float ms
+// without truncating to int.
 func makeSampleSink(current *nimbusevent.NimbusEvent, node, phase, cpu string) SampleSink {
 	if current.ExportRoot == "" {
 		return nil
 	}
 	return func(rt time.Duration) {
-		if err := export.AppendSample(current.ExportRoot, node, phase, cpu, rt.Milliseconds()); err != nil {
+		if err := export.AppendSample(current.ExportRoot, node, phase, cpu, rt); err != nil {
 			logging.Warning(fmt.Sprintf("[export] AppendSample failed (%s %s %s): %v", node, phase, cpu, err))
 		}
 	}

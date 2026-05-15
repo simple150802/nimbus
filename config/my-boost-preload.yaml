@@ -1,0 +1,51 @@
+# Nimbus that loads a previously-exported run instead of re-measuring.
+# Use this manifest when you already have results under
+# <repo>/results/<timestamp>/ from a previous apply of config/my-boost-export.yaml.
+#
+# Workflow:
+#   1. kubectl delete nimbus boost-001 -n serverless    # clears .status; preMeasured needs a clean slate
+#   2. Edit preMeasured.loadFromDir below to the run you want to reuse
+#   3. kubectl apply -f config/my-boost-preload.yaml
+#
+# Expected controller log on apply:
+#   [preMeasured] ../results/<ts>: loaded node=<n> starting=<x>m running=<y>m
+#   Skipping binary search — all <N> candidate node(s) saturated
+#
+# If a node is missing from <loadFromDir> (e.g. only worker/result.json exists),
+# that node falls through to the slow path and the binary search runs only for
+# the missing node(s). Mix-and-match per node is supported.
+apiVersion: lazyken.io/v1alpha1
+kind: Nimbus
+metadata:
+  name: boost-001
+  namespace: serverless
+selector:
+  matchExpressions:
+  - key: serving.knative.dev/service
+    operator: In
+    values: ["measure-yolo-001", "measure-yolo-002", "measure-yolo-003"]
+spec:
+  # Path to the timestamped run directory produced by a previous
+  # config/my-boost-export.yaml apply. Edit the timestamp to match your
+  # actual results/ subdir before applying. Path-resolution rules are
+  # identical to spec.export.dir (relative against cwd, absolute as-is).
+  preMeasured:
+    loadFromDir: "../results/2026-05-14T10-56-11"
+
+  # Same workload definition as the export manifest — required fields. The
+  # controller still creates the StartupCPUBoost CR + patches the ksvc CPU
+  # limits at apply time, using the loaded startingCpu / runningCpu values.
+  measurement:
+    coldSamples: 3
+    warmSamples: 3
+  resourcePolicy:
+    containerPolicies:
+    - containerName: user-container
+      resourceRange:
+        limits:
+          min: "300m"
+          max: "1000m"
+  durationPolicy:
+    apiCondition:
+      url: "http://measure-yolo-001.serverless.svc.cluster.local/status"
+      response: "READY"
