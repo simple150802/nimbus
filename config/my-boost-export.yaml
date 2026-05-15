@@ -20,6 +20,19 @@ selector:
     operator: In
     values: ["measure-yolo-001", "measure-yolo-002", "measure-yolo-003"]
 spec:
+  # Optional: RT metric the binary search converges against. Default p95.
+  # All three percentiles are recorded per probe regardless; this only
+  # selects which one drives the 10% improvement gate.
+  # metric: p95
+
+  # Optional: latency budgets in milliseconds, consumed exclusively by the
+  # online stage (Phase 2 derives per-node c_min from these + the sample
+  # list). The offline binary search ignores this field. cold is required
+  # when the object is present; warm is optional.
+  # acceptableResponseTime:
+  #   cold: 1500
+  #   warm: 50
+
   # Write per-probe raw TTFB CSVs + meta.json + per-node result.json under
   # <dir>/<run-start-timestamp>/. Path is relative to the controller's
   # working directory.

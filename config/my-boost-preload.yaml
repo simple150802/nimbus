@@ -25,6 +25,18 @@ selector:
     operator: In
     values: ["measure-yolo-001", "measure-yolo-002", "measure-yolo-003"]
 spec:
+  # Optional: must match the metric used when the loaded run was exported,
+  # otherwise the loader logs a [preMeasured] mismatch warning and the
+  # loaded CPU values reflect the *original* run's metric, not this one.
+  # metric: p95
+
+  # Optional: latency budgets, consumed exclusively by the online stage.
+  # The offline preload path ignores this field. cold is required when the
+  # object is present; warm is optional.
+  # acceptableResponseTime:
+  #   cold: 1500
+  #   warm: 50
+
   # Path to the timestamped run directory produced by a previous
   # config/my-boost-export.yaml apply. Edit the timestamp to match your
   # actual results/ subdir before applying. Path-resolution rules are

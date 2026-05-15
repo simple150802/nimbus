@@ -155,12 +155,32 @@ type NimbusSpec struct {
 	// time gate selector in algorithm.metricGate reads it directly.
 	// Echoed into meta.json via the spec snapshot so the online stage
 	// knows which metric drove the saturated CPU it's about to consume.
-	Metric         string            `json:"metric,omitempty"`
+	Metric string `json:"metric,omitempty"`
+
+	// AcceptableResponseTime carries the online-stage's pack-target
+	// budgets. The offline binary search ignores this field; the
+	// online tier waterfall walks the per-node sample list and derives
+	// c_min for each node as the smallest probed CPU where the gate
+	// metric is at or below the budget. Absent = no middle tier; the
+	// waterfall degenerates to c_opt -> c_floor.
+	AcceptableResponseTime *AcceptableResponseTimeSpec `json:"acceptableResponseTime,omitempty"`
+
 	ResourcePolicy ResourcePolicy    `json:"resourcePolicy"`
 	DurationPolicy DurationPolicy    `json:"durationPolicy"`
 	Measurement    MeasurementPolicy `json:"measurement,omitempty"`
 	Export         *ExportSpec       `json:"export,omitempty"`
 	PreMeasured    *PreMeasuredSpec  `json:"preMeasured,omitempty"`
+}
+
+// AcceptableResponseTimeSpec carries per-phase RT budgets in
+// milliseconds. Cold is required when the parent object is present;
+// Warm is optional — absent means the online stage skips c_min
+// derivation for the warm phase entirely. Field types are int64 to
+// match RtStats.{Avg,P90,P95}Millis so the budget can be compared
+// directly against persisted sample values without conversion.
+type AcceptableResponseTimeSpec struct {
+	Cold int64 `json:"cold"`
+	Warm int64 `json:"warm,omitempty"`
 }
 
 // ExportSpec configures filesystem export of raw per-probe samples.

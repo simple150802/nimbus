@@ -55,6 +55,39 @@ spec:
                   type: string
                   enum: [avg, p90, p95]
                   default: p95
+                acceptableResponseTime:
+                  description: |
+                    Phase-specific latency budgets in milliseconds.
+                    Consumed exclusively by the online tier waterfall;
+                    the offline binary search ignores this field. For
+                    each candidate node, the online stage derives c_min
+                    (the "pack target" between c_floor and c_opt) as the
+                    smallest probed CPU on that node where the chosen
+                    spec.metric value is at or below the budget. c_min
+                    is therefore per-node — a slow node may need more CPU
+                    than a fast one to hit the same latency. When this
+                    object is absent the online tier waterfall degenerates
+                    to two tiers (c_opt -> c_floor) — no middle pack
+                    target. The 'cold' subfield is required when the
+                    object is set; 'warm' is optional and may be omitted
+                    when only cold-phase admission needs the middle tier.
+                  type: object
+                  required: [cold]
+                  properties:
+                    cold:
+                      description: |
+                        RT budget in milliseconds for cold-start admission.
+                        c_min_cold per node = smallest probed CPU on that
+                        node where rt[spec.metric] <= this value.
+                      type: integer
+                      minimum: 1
+                    warm:
+                      description: |
+                        Optional RT budget in milliseconds for warm-phase
+                        c_min derivation. Absent = no warm pack target
+                        (waterfall on warm phase is c_opt -> c_floor only).
+                      type: integer
+                      minimum: 1
                 export:
                   description: |
                     Optional sample-export configuration. When set, the

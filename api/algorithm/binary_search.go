@@ -105,11 +105,34 @@ func runBinarySearch(
 	gate := metricGate(current.Spec.Metric)
 	logging.Info(fmt.Sprintf("Binary search gating on metric=%s", resolvedMetric(current.Spec.Metric)))
 
-	statsLow, err := probe(ctx, current, current.Low)
+	// probeOnce memoizes probe() by CPU for the lifetime of this
+	// runBinarySearch call. The loop below re-references current.Low
+	// and current.High across iterations; without this cache, every
+	// iteration where rtMid beats rtLow re-probes current.High from
+	// scratch (~30–90 s per cold probe). Caching per phase is safe
+	// because measurement conditions don't change inside one phase.
+	// recordSample is folded inside so cache hits don't duplicate
+	// sample rows in PerNodeResults — the sample list ends up with
+	// exactly one entry per unique probed CPU.
+	cache := make(map[string]ProbeStats)
+	probeOnce := func(cpu string) (ProbeStats, error) {
+		if stats, ok := cache[cpu]; ok {
+			logging.Info(fmt.Sprintf("[search] cache hit cpu=%s — skipping re-probe", cpu))
+			return stats, nil
+		}
+		stats, err := probe(ctx, current, cpu)
+		if err != nil {
+			return ProbeStats{}, err
+		}
+		cache[cpu] = stats
+		recordSample(cpu, stats)
+		return stats, nil
+	}
+
+	statsLow, err := probeOnce(current.Low)
 	if err != nil {
 		return "", err
 	}
-	recordSample(current.Low, statsLow)
 	rtLow := gate(statsLow)
 
 	for {
@@ -131,19 +154,17 @@ func runBinarySearch(
 		}
 		logging.Info("Checking at", midCPU, "CPU ...")
 
-		statsMid, err := probe(ctx, current, midCPU)
+		statsMid, err := probeOnce(midCPU)
 		if err != nil {
 			return "", err
 		}
-		recordSample(midCPU, statsMid)
 		rtMid := gate(statsMid)
 
 		if float64(rtLow-rtMid)/float64(rtLow) > responseTimeImprovementGate {
-			statsHigh, err := probe(ctx, current, current.High)
+			statsHigh, err := probeOnce(current.High)
 			if err != nil {
 				return "", err
 			}
-			recordSample(current.High, statsHigh)
 			rtHigh := gate(statsHigh)
 			if float64(rtMid-rtHigh)/float64(rtMid) > responseTimeImprovementGate {
 				current.Low = midCPU
