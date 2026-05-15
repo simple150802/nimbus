@@ -198,13 +198,29 @@ spec:
                   required: [apiCondition]
                   properties:
                     apiCondition:
-                      description: HTTP probe whose body, once matched, ends the startup phase.
+                      description: |
+                        HTTP probe whose body, once matched, ends the
+                        startup phase. The controller constructs the
+                        actual URL per ksvc as
+                        http://<ksvc>.<namespace>.svc.cluster.local<path>,
+                        so a Nimbus targeting multiple ksvcs probes each
+                        one at its own URL (the upstream
+                        kube-startup-cpu-boost controller polls these to
+                        decide when each boost ends). Only http scheme +
+                        the standard .svc.cluster.local DNS suffix are
+                        supported today; both are hardcoded in the URL
+                        builder.
                       type: object
-                      required: [url, response]
+                      required: [path, response]
                       properties:
-                        url:
-                          description: Cluster-internal URL the controller GETs during profiling.
+                        path:
+                          description: |
+                            URL path the controller GETs (e.g. "/status").
+                            Must start with '/'. The host and scheme are
+                            derived from the ksvc + namespace.
                           type: string
+                          pattern: "^/.+"
+                          minLength: 1
                         response:
                           description: Substring the controller looks for in the response body to declare readiness.
                           type: string

@@ -59,5 +59,8 @@ spec:
           max: "1000m"
   durationPolicy:
     apiCondition:
-      url: "http://measure-yolo-001.serverless.svc.cluster.local/status"
+      # Just the path. The controller builds the URL per ksvc as
+      # http://<ksvc>.<namespace>.svc.cluster.local<path>, so each
+      # ksvc in values[] is probed at its own URL.
+      path: "/status"
       response: "READY"

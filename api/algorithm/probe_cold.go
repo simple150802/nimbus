@@ -55,8 +55,16 @@ func getResptCold(ctx context.Context, event *nimbusevent.NimbusEvent, cpuValue 
 			labelSelector, event.Metadata.Namespace)
 	}
 
-	kubeapi.CreateStartupCPUBoost(ctx, event, cpuValue)
-	defer kubeapi.DeleteStartupCPUBoost(ctx, event.Metadata.Namespace, event.Metadata.Name)
+	targetKsvc := event.Selector.MatchExpressions[0].Values[0]
+	boostName := event.Metadata.Name + "-" + targetKsvc
+
+	kubeapi.CreateStartupCPUBoost(ctx, event, targetKsvc, cpuValue)
+	defer kubeapi.DeleteStartupCPUBoost(ctx, event.Metadata.Namespace, boostName)
+
+	// targetURL is built from Values[0] (the one ksvc the cold phase
+	// measures) + the user-supplied apiCondition.path; the upstream boost
+	// webhook polls the same URL via its own probe.
+	targetURL := kubeapi.BuildKsvcStatusURL(event.Metadata.Namespace, targetKsvc, event.Spec.DurationPolicy.ApiCondition.Path)
 
 	n := event.Spec.Measurement.ColdSamples
 	if n < 1 {
@@ -64,13 +72,11 @@ func getResptCold(ctx context.Context, event *nimbusevent.NimbusEvent, cpuValue 
 	}
 	logging.Info(fmt.Sprintf("[COLD] samples to collect: %d", n))
 
-	targetKsvc := event.Selector.MatchExpressions[0].Values[0]
-
 	// Buffer the N raw samples locally so we can compute percentiles at
 	// end-of-loop. Released when this function returns (peak ~N*8 bytes).
 	samples := make([]time.Duration, 0, n)
 	for i := 0; i < n; i++ {
-		rt, err := coldSampleWithStuckRecovery(ctx, event, labelSelector, targetKsvc, i+1, n)
+		rt, err := coldSampleWithStuckRecovery(ctx, event, labelSelector, targetKsvc, targetURL, i+1, n)
 		if err != nil {
 			return ProbeStats{}, err
 		}
@@ -96,7 +102,7 @@ func getResptCold(ctx context.Context, event *nimbusevent.NimbusEvent, cpuValue 
 func coldSampleWithStuckRecovery(
 	ctx context.Context,
 	event *nimbusevent.NimbusEvent,
-	labelSelector, targetKsvc string,
+	labelSelector, targetKsvc, targetURL string,
 	sampleIdx, sampleTotal int,
 ) (time.Duration, error) {
 	for attempt := 1; attempt <= maxStuckRetries; attempt++ {
@@ -129,7 +135,7 @@ func coldSampleWithStuckRecovery(
 		go kubeapi.MonitorKsvcResources(monCtx, phaseCold, event.Metadata.Namespace, targetKsvc)
 
 		probeCtx, probeCancel := context.WithTimeout(ctx, probeTimeout)
-		rt, err := triggerHttp(probeCtx, phaseCold, event.Spec.DurationPolicy.ApiCondition)
+		rt, err := triggerHttp(probeCtx, phaseCold, targetURL, event.Spec.DurationPolicy.ApiCondition.Response)
 		probeCancel()
 		monCancel()
 

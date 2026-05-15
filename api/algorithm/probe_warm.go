@@ -50,6 +50,7 @@ func getResptWarm(ctx context.Context, event *nimbusevent.NimbusEvent, cpuValue 
 	}
 
 	targetKsvc := event.Selector.MatchExpressions[0].Values[0]
+	boostName := event.Metadata.Name + "-" + targetKsvc
 	if err := kubeapi.PatchResourceLimits(ctx, event.Metadata.Namespace, targetKsvc, cpuValue); err != nil {
 		logging.Failure("[WARM] failed to patch ksvc CPU limit:", err)
 		return ProbeStats{}, err
@@ -60,15 +61,20 @@ func getResptWarm(ctx context.Context, event *nimbusevent.NimbusEvent, cpuValue 
 		return ProbeStats{}, err
 	}
 
-	kubeapi.CreateStartupCPUBoost(ctx, event, cpuCold)
-	defer kubeapi.DeleteStartupCPUBoost(ctx, event.Metadata.Namespace, event.Metadata.Name)
+	kubeapi.CreateStartupCPUBoost(ctx, event, targetKsvc, cpuCold)
+	defer kubeapi.DeleteStartupCPUBoost(ctx, event.Metadata.Namespace, boostName)
 
 	monCtx, monCancel := context.WithCancel(ctx)
 	defer monCancel()
 	go kubeapi.MonitorKsvcResources(monCtx, phaseWarm, event.Metadata.Namespace, targetKsvc)
 
+	// targetURL built per ksvc — Values[0] is the one the warm phase
+	// measures; the upstream boost webhook polls the same URL.
+	targetURL := kubeapi.BuildKsvcStatusURL(event.Metadata.Namespace, targetKsvc, event.Spec.DurationPolicy.ApiCondition.Path)
+	expectedResponse := event.Spec.DurationPolicy.ApiCondition.Response
+
 	logging.Info("[WARM] warmup curl before timed samples")
-	if _, err := triggerHttp(ctx, phaseWarm, event.Spec.DurationPolicy.ApiCondition); err != nil {
+	if _, err := triggerHttp(ctx, phaseWarm, targetURL, expectedResponse); err != nil {
 		return ProbeStats{}, err
 	}
 
@@ -82,7 +88,7 @@ func getResptWarm(ctx context.Context, event *nimbusevent.NimbusEvent, cpuValue 
 	// end-of-loop. Released when this function returns (peak ~N*8 bytes).
 	samples := make([]time.Duration, 0, n)
 	for i := 0; i < n; i++ {
-		rt, err := triggerHttp(ctx, phaseWarm, event.Spec.DurationPolicy.ApiCondition)
+		rt, err := triggerHttp(ctx, phaseWarm, targetURL, expectedResponse)
 		if err != nil {
 			return ProbeStats{}, err
 		}

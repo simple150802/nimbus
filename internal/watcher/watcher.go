@@ -186,9 +186,13 @@ func (nw *NimbusWatcher) RunWorker(ctx context.Context) {
 		runningMax := kubeapi.MaxRunningCpu(current.PerNodeResults)
 
 		// Apply paths are idempotent. Errors are logged inside each helper;
-		// surfacing them here would just duplicate log lines.
-		kubeapi.CreateStartupCPUBoost(ctx, current, startingMax)
+		// surfacing them here would just duplicate log lines. One boost CR
+		// per ksvc — each named "<nimbus>-<ksvc>" with labels identifying
+		// the owning Nimbus, so the upstream kube-startup-cpu-boost
+		// controller runs an independent boost lifecycle per ksvc and the
+		// reset recipe can label-select for cleanup.
 		for _, ksvc := range current.Selector.MatchExpressions[0].Values {
+			kubeapi.CreateStartupCPUBoost(ctx, current, ksvc, startingMax)
 			kubeapi.PatchResourceLimits(ctx, current.Metadata.Namespace, ksvc, runningMax)
 		}
 

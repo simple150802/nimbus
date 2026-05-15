@@ -235,6 +235,10 @@ type DurationPolicy struct {
 }
 
 type ApiCondition struct {
-	Url      string `json:"url"`
+	// Path is the URL path the controller GETs (e.g. "/status"). The full
+	// URL is constructed per ksvc via kubeapi.BuildKsvcStatusURL — see
+	// that helper for the format. Must start with '/' (enforced by the
+	// CRD pattern).
+	Path     string `json:"path"`
 	Response string `json:"response"`
 }

@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"nimbus/api/logging"
-	"nimbus/api/nimbusevent"
 )
 
 // httpProbeTimeout caps the per-request timeout of the HTTP client.
@@ -18,15 +17,15 @@ import (
 // retries until the parent context's deadline fires.
 const httpProbeTimeout = 5 * time.Second
 
-// triggerHttp repeatedly GETs api_condition.Url until the response body
-// contains the expected substring. The phase tag ("COLD" / "WARM") is
-// included in every log line so a scrolling log makes the active probe
-// obvious. Honors ctx: cancellation aborts both in-flight requests and
-// the inter-retry wait, so SIGINT (or a probeTimeout deadline) stops the
+// triggerHttp repeatedly GETs targetURL until the response body contains
+// expectedResponse. URL is constructed by the caller via
+// kubeapi.BuildKsvcStatusURL — triggerHttp is pure HTTP-retry logic, no
+// Knative-DNS knowledge. The phase tag ("COLD" / "WARM") is included in
+// every log line so a scrolling log makes the active probe obvious.
+// Honors ctx: cancellation aborts both in-flight requests and the
+// inter-retry wait, so SIGINT (or a probeTimeout deadline) stops the
 // probe immediately.
-func triggerHttp(ctx context.Context, phase string, api_condition nimbusevent.ApiCondition) (time.Duration, error) {
-	targetURL := api_condition.Url
-	expectedResponse := api_condition.Response
+func triggerHttp(ctx context.Context, phase, targetURL, expectedResponse string) (time.Duration, error) {
 	logging.Normal(fmt.Sprintf("[%s] curl GET %s (expect body~%q)", phase, targetURL, expectedResponse))
 
 	client := &http.Client{Timeout: httpProbeTimeout}
