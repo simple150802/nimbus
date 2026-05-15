@@ -16,14 +16,56 @@ import (
 )
 
 // ProbeStats summarises a probe's individual-sample response times.
-// Avg is the arithmetic mean (drives binary-search convergence today);
-// P90 / P95 are nearest-rank percentiles for SLO analysis. Computed by
-// computeProbeStats from the per-sample slice held inside getResptCold /
-// getResptWarm — never escapes the probe function.
+// Avg is the arithmetic mean; P90 / P95 are nearest-rank percentiles.
+// One of these three drives binary-search convergence per run — chosen
+// via NimbusSpec.Metric and resolved at call sites through metricGate.
+// Computed by computeProbeStats from the per-sample slice held inside
+// getResptCold / getResptWarm — never escapes the probe function.
 type ProbeStats struct {
 	Avg time.Duration
 	P90 time.Duration
 	P95 time.Duration
+}
+
+// MetricAvg / MetricP90 / MetricP95 are the legal values of
+// NimbusSpec.Metric. Mirror the CRD enum in config/crd.yaml. Empty
+// string falls through to MetricP95 inside metricGate.
+const (
+	MetricAvg = "avg"
+	MetricP90 = "p90"
+	MetricP95 = "p95"
+)
+
+// metricGate returns the ProbeStats accessor the binary-search
+// convergence math should use for this run. Unknown / empty values
+// default to p95 — same default as the CRD — so an upgraded
+// controller running against an old Nimbus that predates the field
+// behaves identically to a fresh one with no spec.metric set.
+func metricGate(metric string) func(ProbeStats) time.Duration {
+	switch metric {
+	case MetricAvg:
+		return func(s ProbeStats) time.Duration { return s.Avg }
+	case MetricP90:
+		return func(s ProbeStats) time.Duration { return s.P90 }
+	case MetricP95, "":
+		return func(s ProbeStats) time.Duration { return s.P95 }
+	default:
+		logging.Warning(fmt.Sprintf("unknown spec.metric=%q, falling back to p95", metric))
+		return func(s ProbeStats) time.Duration { return s.P95 }
+	}
+}
+
+// resolvedMetric returns the metric name actually used by metricGate for
+// the given spec value. Mirrors metricGate's fallback rules so logging
+// and meta consumers can report the effective gate without re-deriving
+// the switch.
+func resolvedMetric(metric string) string {
+	switch metric {
+	case MetricAvg, MetricP90, MetricP95:
+		return metric
+	default:
+		return MetricP95
+	}
 }
 
 // computeProbeStats returns the mean and nearest-rank p90 / p95 over a

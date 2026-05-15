@@ -149,6 +149,13 @@ type MatchExpression struct {
 // 3. The Core Spec
 // ---------------------------------------------------------
 type NimbusSpec struct {
+	// Metric is the RT percentile the binary search gates on — one of
+	// "avg", "p90", "p95". Empty string is treated as the CRD default
+	// ("p95"). The spec field is the only place this lives; the run-
+	// time gate selector in algorithm.metricGate reads it directly.
+	// Echoed into meta.json via the spec snapshot so the online stage
+	// knows which metric drove the saturated CPU it's about to consume.
+	Metric         string            `json:"metric,omitempty"`
 	ResourcePolicy ResourcePolicy    `json:"resourcePolicy"`
 	DurationPolicy DurationPolicy    `json:"durationPolicy"`
 	Measurement    MeasurementPolicy `json:"measurement,omitempty"`

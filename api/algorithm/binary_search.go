@@ -78,15 +78,16 @@ func BinarySearch(ctx context.Context, current *nimbusevent.NimbusEvent, node st
 // probeFn is a phase-agnostic measurement primitive. The starting phase
 // passes a closure around getResptCold; the running phase passes one
 // around getResptWarm. Both return ProbeStats (avg + p90 + p95) for one
-// probe-point's batch of N samples. The convergence math uses
-// stats.Avg; the percentile fields ride along for the recordSample
-// callback to persist.
+// probe-point's batch of N samples. The convergence math uses whichever
+// percentile metricGate(current.Spec.Metric) selects; the other two
+// ride along for the recordSample callback to persist.
 type probeFn func(ctx context.Context, current *nimbusevent.NimbusEvent, cpu string) (ProbeStats, error)
 
 // runBinarySearch is the shared convergence loop used by both phases.
 // It walks the [low, high] window, asking probe() for the response time
 // at low, mid, and high, and chooses which bound to move based on the
-// 10% improvement gate over avg. Stops when high - low <=
+// 10% improvement gate over the metric named in current.Spec.Metric
+// (defaults to p95 via metricGate). Stops when high - low <=
 // convergenceThresholdMilli. On success it writes setResult(current.High)
 // and returns current.High.
 //
@@ -101,12 +102,15 @@ func runBinarySearch(
 	setResult func(cpu string),
 	recordSample func(cpu string, stats ProbeStats),
 ) (string, error) {
+	gate := metricGate(current.Spec.Metric)
+	logging.Info(fmt.Sprintf("Binary search gating on metric=%s", resolvedMetric(current.Spec.Metric)))
+
 	statsLow, err := probe(ctx, current, current.Low)
 	if err != nil {
 		return "", err
 	}
 	recordSample(current.Low, statsLow)
-	rtLow := statsLow.Avg
+	rtLow := gate(statsLow)
 
 	for {
 		shouldContinue, err := kubeapi.IsDiffGreaterThresh(current.Low, current.High, convergenceThresholdMilli)
@@ -132,7 +136,7 @@ func runBinarySearch(
 			return "", err
 		}
 		recordSample(midCPU, statsMid)
-		rtMid := statsMid.Avg
+		rtMid := gate(statsMid)
 
 		if float64(rtLow-rtMid)/float64(rtLow) > responseTimeImprovementGate {
 			statsHigh, err := probe(ctx, current, current.High)
@@ -140,7 +144,7 @@ func runBinarySearch(
 				return "", err
 			}
 			recordSample(current.High, statsHigh)
-			rtHigh := statsHigh.Avg
+			rtHigh := gate(statsHigh)
 			if float64(rtMid-rtHigh)/float64(rtMid) > responseTimeImprovementGate {
 				current.Low = midCPU
 				rtLow = rtMid

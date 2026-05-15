@@ -2,13 +2,15 @@
 // produced by internal/export) and translates it back into in-memory
 // NodeResult entries the watcher can use to skip the binary search.
 //
-// Today the loader reads only <dir>/<node>/result.json — enough to mark
-// a node "saturated" and trigger the fast-path skip. Raw per-sample CSVs
-// under <node>/<phase>/<cpu>.csv are NOT consumed here: the controller's
-// in-memory PerNodeResults.ColdRtSamples / WarmRtSamples are populated
-// by the binary search itself, not by replay. If the online stage later
-// needs the historical samples, extend ReadRunDir to walk the CSVs and
-// aggregate per CPU.
+// The loader reads <dir>/<node>/result.json, which since the Option-A
+// change carries both the converged CPU values AND the per-probe sample
+// trail (coldRtSamples / warmRtSamples). The sample trail then flows
+// through applyPreMeasured → WriteNimbusStatus into .status.perNode, so
+// a preload-driven run leaves status with the same per-CPU sample list
+// a fresh measurement would have produced. Raw per-sample CSVs under
+// <node>/<phase>/<cpu>.csv are still NOT consumed — those exist for
+// ad-hoc analysis (pandas / Jupyter) and aren't needed for the runtime
+// path.
 package preMeasured
 
 import (
@@ -30,13 +32,56 @@ var ErrDirNotFound = errors.New("preMeasured: loadFromDir does not exist")
 // Kept private so the export package's internal type stays the source
 // of truth; this is a read-only mirror.
 type nodeResultFile struct {
-	Node                 string               `json:"node"`
-	StartingCpu          string               `json:"startingCpu,omitempty"`
-	StartingRt           *nimbusevent.RtStats `json:"startingRt,omitempty"`
-	RunningCpu           string               `json:"runningCpu,omitempty"`
-	RunningRt            *nimbusevent.RtStats `json:"runningRt,omitempty"`
-	ColdPhaseCompletedAt string               `json:"cold_phase_completed_at,omitempty"`
-	WarmPhaseCompletedAt string               `json:"warm_phase_completed_at,omitempty"`
+	Node                 string                    `json:"node"`
+	StartingCpu          string                    `json:"startingCpu,omitempty"`
+	StartingRt           *nimbusevent.RtStats      `json:"startingRt,omitempty"`
+	ColdRtSamples        []nimbusevent.SamplePoint `json:"coldRtSamples,omitempty"`
+	RunningCpu           string                    `json:"runningCpu,omitempty"`
+	RunningRt            *nimbusevent.RtStats      `json:"runningRt,omitempty"`
+	WarmRtSamples        []nimbusevent.SamplePoint `json:"warmRtSamples,omitempty"`
+	ColdPhaseCompletedAt string                    `json:"cold_phase_completed_at,omitempty"`
+	WarmPhaseCompletedAt string                    `json:"warm_phase_completed_at,omitempty"`
+}
+
+// ReadRunMetric returns the spec.metric value recorded in
+// <loadFromDir>/meta.json. Empty string + nil err means "unknown" —
+// either the file is missing, malformed, or the field wasn't set when
+// the run was exported (pre-metric-field controllers). The caller uses
+// this for an informational mismatch warning; it never blocks the load.
+// Returns ErrDirNotFound if loadFromDir itself doesn't exist.
+func ReadRunMetric(loadFromDir string) (string, error) {
+	if loadFromDir == "" {
+		return "", fmt.Errorf("loadFromDir is empty")
+	}
+	abs, err := filepath.Abs(loadFromDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve absolute path: %w", err)
+	}
+	if _, err := os.Stat(abs); err != nil {
+		if os.IsNotExist(err) {
+			return "", ErrDirNotFound
+		}
+		return "", err
+	}
+	data, err := os.ReadFile(filepath.Join(abs, "meta.json"))
+	if err != nil {
+		return "", nil
+	}
+	// Anonymous shape: peel only the one field we care about so we
+	// don't have to mirror the full runMeta struct from the export
+	// package (which is private to that package and would create a
+	// dependency cycle if exported).
+	var meta struct {
+		Nimbus struct {
+			Spec struct {
+				Metric string `json:"metric"`
+			} `json:"spec"`
+		} `json:"nimbus"`
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return "", nil
+	}
+	return meta.Nimbus.Spec.Metric, nil
 }
 
 // ReadRunDir scans loadFromDir for one subdirectory per node and reads
@@ -93,16 +138,25 @@ func ReadRunDir(loadFromDir string) (map[string]*nimbusevent.NodeResult, error) 
 			continue
 		}
 
+		// Defensive copies of the sample slices so a future mutation
+		// of out[node].ColdRtSamples doesn't reach back into the
+		// JSON-decoded buffer.
+		var cold, warm []nimbusevent.SamplePoint
+		if len(nrf.ColdRtSamples) > 0 {
+			cold = append([]nimbusevent.SamplePoint(nil), nrf.ColdRtSamples...)
+		}
+		if len(nrf.WarmRtSamples) > 0 {
+			warm = append([]nimbusevent.SamplePoint(nil), nrf.WarmRtSamples...)
+		}
 		out[nodeName] = &nimbusevent.NodeResult{
 			StartingCpu:       nrf.StartingCpu,
 			StartingRt:        nrf.StartingRt,
+			ColdRtSamples:     cold,
 			RunningCpu:        nrf.RunningCpu,
 			RunningRt:         nrf.RunningRt,
+			WarmRtSamples:     warm,
 			StartingSaturated: true,
 			RunningSaturated:  true,
-			// ColdRtSamples / WarmRtSamples deliberately empty — see
-			// package doc. Online stage that needs samples should be
-			// extended here.
 		}
 	}
 

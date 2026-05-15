@@ -131,6 +131,24 @@ func applyPreMeasured(current *nimbusevent.NimbusEvent) bool {
 		return false
 	}
 
+	// Best-effort metric-mismatch warning. The load proceeds regardless —
+	// the user opted in explicitly, so we just surface the mismatch so they
+	// know the loaded CPU values may not match the semantics their current
+	// spec is asking for.
+	if loadedMetric, _ := preMeasured.ReadRunMetric(dir); loadedMetric != "" {
+		if normalizeMetric(loadedMetric) != normalizeMetric(current.Spec.Metric) {
+			logging.Warning(fmt.Sprintf(
+				"[preMeasured] %s: loaded data was measured under metric=%s; "+
+					"current spec specifies metric=%s. Loaded CPU values reflect "+
+					"%s-saturation. Delete .status.perNode and re-measure for accuracy.",
+				dir,
+				normalizeMetric(loadedMetric),
+				normalizeMetric(current.Spec.Metric),
+				normalizeMetric(loadedMetric),
+			))
+		}
+	}
+
 	contributed := false
 	for _, node := range current.CandidateNodes {
 		existing := current.PerNodeResults[node]
@@ -143,17 +161,22 @@ func applyPreMeasured(current *nimbusevent.NimbusEvent) bool {
 			continue // no preMeasured data for this candidate node
 		}
 
-		// Overlay. We re-use existing (and any partial sample slices it had)
-		// rather than overwriting, in case future iterations decide to keep
-		// partially-saturated state. Today both phases come from the load.
+		// Overlay. When existing is non-nil, replace each phase's fields
+		// as a unit — including the sample slice — so the in-memory view
+		// matches what just got loaded for that phase. Status writes
+		// downstream serialize ColdRtSamples / WarmRtSamples into
+		// .status.perNode, restoring the search trail a fresh measurement
+		// would have produced. Today both phases come from the load.
 		if existing == nil {
 			current.PerNodeResults[node] = preLoaded
 		} else {
 			existing.StartingCpu = preLoaded.StartingCpu
 			existing.StartingRt = preLoaded.StartingRt
+			existing.ColdRtSamples = preLoaded.ColdRtSamples
 			existing.StartingSaturated = preLoaded.StartingSaturated
 			existing.RunningCpu = preLoaded.RunningCpu
 			existing.RunningRt = preLoaded.RunningRt
+			existing.WarmRtSamples = preLoaded.WarmRtSamples
 			existing.RunningSaturated = preLoaded.RunningSaturated
 		}
 		contributed = true
@@ -165,6 +188,19 @@ func applyPreMeasured(current *nimbusevent.NimbusEvent) bool {
 		recomputeAllSaturated(current)
 	}
 	return contributed
+}
+
+// normalizeMetric folds the empty-string default into "p95" so the
+// mismatch comparison in applyPreMeasured doesn't false-warn when one
+// side sets metric=p95 explicitly and the other omits the field (both
+// resolve to p95 at runtime). Mirrors algorithm.metricGate's fallback
+// rule. Unknown values are passed through as-is so the warning still
+// surfaces them.
+func normalizeMetric(metric string) string {
+	if metric == "" {
+		return "p95"
+	}
+	return metric
 }
 
 // recomputeAllSaturated maintains the invariant that current.AllSaturated

@@ -173,20 +173,31 @@ func WriteMeta(runRoot string, ev *nimbusevent.NimbusEvent, candidateNodes []str
 }
 
 // nodeResultFile is the shape of <runRoot>/<node>/result.json.
+//
+// ColdRtSamples / WarmRtSamples carry the full per-probe search trail —
+// one SamplePoint per CPU the binary search visited, sorted ascending by
+// CPU. Persisting them here (in addition to .status.perNode) makes
+// result.json self-sufficient for the preload path: ReadRunDir can
+// restore the in-memory sample slice without walking the raw per-CPU
+// CSVs. The raw CSVs still hold the individual per-sample rows for ad-
+// hoc analysis (pandas / Jupyter); result.json holds the aggregated
+// (cpu, avg, p90, p95) view consumed by the controller.
 type nodeResultFile struct {
-	Node                 string               `json:"node"`
-	StartingCpu          string               `json:"startingCpu,omitempty"`
-	StartingRt           *nimbusevent.RtStats `json:"startingRt,omitempty"`
-	RunningCpu           string               `json:"runningCpu,omitempty"`
-	RunningRt            *nimbusevent.RtStats `json:"runningRt,omitempty"`
-	ColdPhaseCompletedAt string               `json:"cold_phase_completed_at,omitempty"`
-	WarmPhaseCompletedAt string               `json:"warm_phase_completed_at,omitempty"`
+	Node                 string                    `json:"node"`
+	StartingCpu          string                    `json:"startingCpu,omitempty"`
+	StartingRt           *nimbusevent.RtStats      `json:"startingRt,omitempty"`
+	ColdRtSamples        []nimbusevent.SamplePoint `json:"coldRtSamples,omitempty"`
+	RunningCpu           string                    `json:"runningCpu,omitempty"`
+	RunningRt            *nimbusevent.RtStats      `json:"runningRt,omitempty"`
+	WarmRtSamples        []nimbusevent.SamplePoint `json:"warmRtSamples,omitempty"`
+	ColdPhaseCompletedAt string                    `json:"cold_phase_completed_at,omitempty"`
+	WarmPhaseCompletedAt string                    `json:"warm_phase_completed_at,omitempty"`
 }
 
 // WriteResult writes <runRoot>/<node>/result.json with the converged CPU
-// values + saturated RT stats for this node. Overwrites any existing
-// file. completedAt is the timestamp at which the per-node search
-// finished.
+// values + saturated RT stats + the full per-probe sample trail for
+// this node. Overwrites any existing file. completedAt is the timestamp
+// at which the per-node search finished.
 func WriteResult(runRoot, node string, r *nimbusevent.NodeResult, completedAt time.Time) error {
 	if runRoot == "" || r == nil {
 		return nil
@@ -197,11 +208,13 @@ func WriteResult(runRoot, node string, r *nimbusevent.NodeResult, completedAt ti
 	}
 	completedIso := completedAt.UTC().Format(time.RFC3339)
 	out := nodeResultFile{
-		Node:        node,
-		StartingCpu: r.StartingCpu,
-		StartingRt:  r.StartingRt,
-		RunningCpu:  r.RunningCpu,
-		RunningRt:   r.RunningRt,
+		Node:          node,
+		StartingCpu:   r.StartingCpu,
+		StartingRt:    r.StartingRt,
+		ColdRtSamples: r.ColdRtSamples,
+		RunningCpu:    r.RunningCpu,
+		RunningRt:     r.RunningRt,
+		WarmRtSamples: r.WarmRtSamples,
 	}
 	// Use the same completedAt for both phases — we write at end-of-node, not
 	// end-of-phase. Refining this would require a second timestamp arg; not

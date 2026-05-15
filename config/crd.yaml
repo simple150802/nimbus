@@ -41,6 +41,20 @@ spec:
               type: object
               required: [resourcePolicy, durationPolicy]
               properties:
+                metric:
+                  description: |
+                    RT metric the binary search gates on. The search
+                    converges to the smallest CPU at which the chosen
+                    metric stops improving by more than 10% between
+                    adjacent probes. All three percentiles are still
+                    measured and recorded in the sample list for every
+                    probe; this field only selects which one drives
+                    convergence (and therefore which one ends up in
+                    .status.perNode[*].startingCpu / .runningCpu).
+                    Defaults to p95 — the most conservative choice.
+                  type: string
+                  enum: [avg, p90, p95]
+                  default: p95
                 export:
                   description: |
                     Optional sample-export configuration. When set, the
@@ -198,12 +212,13 @@ spec:
               description: |
                 Observed state — filled in by the controller. perNode keys
                 are cluster node names; each entry holds the finalized CPU
-                limits the binary search converged to on that node. The
-                Nimbus is considered "completed" once every candidate node
-                has both startingCpu and runningCpu populated, at which
-                point a controller restart will re-apply these values
-                without re-probing. To force a re-search, clear the map
-                via the status subresource.
+                limit the binary search converged to on that node under
+                the gate metric chosen in spec.metric. The Nimbus is
+                considered "completed" once every candidate node has both
+                startingCpu and runningCpu populated, at which point a
+                controller restart will re-apply these values without
+                re-probing. To force a re-search, clear the map via the
+                status subresource.
 
                 The top-level runningCpu / startingCpu are cluster-wide
                 aggregates (max over perNode) — exactly the values the
@@ -215,7 +230,8 @@ spec:
                   description: |
                     Cluster-wide steady-state CPU limit applied to the ksvc.
                     Equals the max of perNode[*].runningCpu so the slowest
-                    node still meets the running-phase RT budget.
+                    node still meets the running-phase RT budget under the
+                    gate metric.
                   type: string
                   pattern: "^(\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))))?$"
                 startingCpu:
@@ -223,7 +239,8 @@ spec:
                     Cluster-wide cold-phase CPU limit applied via the
                     StartupCPUBoost CR. Equals the max of
                     perNode[*].startingCpu so the slowest node still
-                    cold-starts within the configured RT budget.
+                    cold-starts within the configured RT budget under the
+                    gate metric.
                   type: string
                   pattern: "^(\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))))?$"
                 perNode:
@@ -233,26 +250,31 @@ spec:
                     type: object
                     properties:
                       startingCpu:
-                        description: Finalized CPU limit for the startup phase on this node.
+                        description: |
+                          Finalized CPU limit for the startup phase on this
+                          node, computed under the run's gate metric
+                          (spec.metric, defaults to p95).
                         type: string
                       startingRt:
                         description: |
-                          Saturated RT stats — the (avg, p90, p95) measured at
-                          the converged startingCpu. Populated when the cold
-                          phase saturates; omitted otherwise.
+                          Saturated RT stats — the (avg, p90, p95) measured
+                          at the converged startingCpu. Populated when the
+                          cold phase saturates; omitted otherwise.
                         type: object
                         properties:
                           avgMillis: { type: integer, minimum: 0 }
                           p90Millis: { type: integer, minimum: 0 }
                           p95Millis: { type: integer, minimum: 0 }
                       runningCpu:
-                        description: Finalized CPU limit for the running phase on this node.
+                        description: |
+                          Finalized CPU limit for the running phase on this
+                          node, computed under the run's gate metric.
                         type: string
                       runningRt:
                         description: |
-                          Saturated RT stats — the (avg, p90, p95) measured at
-                          the converged runningCpu. Populated when the warm
-                          phase saturates; omitted otherwise.
+                          Saturated RT stats — the (avg, p90, p95) measured
+                          at the converged runningCpu. Populated when the
+                          warm phase saturates; omitted otherwise.
                         type: object
                         properties:
                           avgMillis: { type: integer, minimum: 0 }

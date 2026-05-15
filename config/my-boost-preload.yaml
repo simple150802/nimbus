@@ -30,7 +30,7 @@ spec:
   # actual results/ subdir before applying. Path-resolution rules are
   # identical to spec.export.dir (relative against cwd, absolute as-is).
   preMeasured:
-    loadFromDir: "../results/2026-05-14T10-56-11"
+    loadFromDir: "../results/backup"
 
   # Same workload definition as the export manifest — required fields. The
   # controller still creates the StartupCPUBoost CR + patches the ksvc CPU
