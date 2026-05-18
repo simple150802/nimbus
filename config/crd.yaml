@@ -375,3 +375,104 @@ spec:
                             rtP95Millis:
                               type: integer
                               minimum: 0
+                online:
+                  description: |
+                    Online-stage assignments — filled in by the online reconciler
+                    after offline saturation. One entry per ksvc named in
+                    spec.selector.matchExpressions[0].values. Drives the
+                    experiment script's policy join and the controller's
+                    per-ksvc CPU/node patches. Absent until the online stage
+                    runs for the first time.
+                  type: object
+                  properties:
+                    activeAssignments:
+                      description: |
+                        Count of entries in assignments[]. Equals
+                        len(assignments). Exposed for "kubectl get -o wide"
+                        and for quick health checks without parsing the array.
+                      type: integer
+                      minimum: 0
+                    assignments:
+                      description: |
+                        One row per managed ksvc, in the order they appear in
+                        spec.selector.matchExpressions[0].values. A row is
+                        produced even if the ksvc could only be assigned at
+                        tier=c_floor with degraded=true; the only reason a
+                        listed ksvc is omitted is that it does not exist in
+                        the cluster (the reconciler logs and skips).
+                      type: array
+                      items:
+                        type: object
+                        required: [ksvc, node, tier, startingCpu, runningCpu]
+                        properties:
+                          ksvc:
+                            description: |
+                              Knative service name this row describes. Always
+                              one of spec.selector.matchExpressions[0].values.
+                              Join key for the experiment CSV.
+                            type: string
+                          node:
+                            description: |
+                              Kubernetes node selected for this ksvc. Patched
+                              onto the ksvc as
+                              spec.template.spec.nodeSelector["kubernetes.io/hostname"].
+                              Must be in the Nimbus's candidate-nodes set and
+                              must have profile data in status.perNode.
+                            type: string
+                          tier:
+                            description: |
+                              Performance tier assigned by the waterfall
+                              scheduler. c_opt = offline-converged knee from
+                              status.perNode. c_min = smallest sampled CPU
+                              meeting spec.acceptableResponseTime (only
+                              available when that field is set). c_floor =
+                              spec.resourcePolicy...limits.min; no SLO
+                              guarantee. See online.md §"CPU Tier Model".
+                            type: string
+                            enum: ["c_opt", "c_min", "c_floor"]
+                          startingCpu:
+                            description: |
+                              Cold-phase CPU value written into the per-ksvc
+                              StartupCPUBoost CR. Source depends on tier:
+                              c_opt -> status.perNode[node].startingCpu,
+                              c_min -> smallest cold sample meeting
+                              acceptableResponseTime.cold under spec.metric,
+                              c_floor -> spec.resourcePolicy...limits.min.
+                            type: string
+                            pattern: "^(\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))))?$"
+                          runningCpu:
+                            description: |
+                              Steady-state CPU value patched onto the ksvc as
+                              spec.template.spec.containers[0].resources.limits.cpu.
+                              Always <= startingCpu. Same per-tier derivation
+                              as startingCpu but from warm samples and
+                              acceptableResponseTime.warm.
+                            type: string
+                            pattern: "^(\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))))?$"
+                          degraded:
+                            description: |
+                              True only when the waterfall ran out of headroom
+                              and admitted this ksvc at c_floor on the
+                              least-loaded node (no SLO guarantee). False in
+                              the normal path even when tier=c_floor, if
+                              c_floor was the first tier to fit on a properly
+                              chosen node. Lets experiments separate "real"
+                              assignments from "we had to put it somewhere".
+                            type: boolean
+                          ready:
+                            description: |
+                              Mirror of the target ksvc's Ready condition at
+                              the time of the last reconcile. ready=false
+                              means the patch landed but the ksvc didn't come
+                              up healthy under the assigned CPU — useful for
+                              the experiment script to drop bad rows.
+                            type: boolean
+                          url:
+                            description: |
+                              Cluster-internal URL for this ksvc, built via
+                              BuildKsvcStatusURL(ns, ksvc, spec...path).
+                              Cached on status so the experiment script
+                              doesn't need a separate kubectl get ksvc per
+                              row, and to pin the URL to what online
+                              actually decided.
+                            type: string
