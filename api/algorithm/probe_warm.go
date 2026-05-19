@@ -69,12 +69,14 @@ func getResptWarm(ctx context.Context, event *nimbusevent.NimbusEvent, cpuValue 
 	go kubeapi.MonitorKsvcResources(monCtx, phaseWarm, event.Metadata.Namespace, targetKsvc)
 
 	// targetURL built per ksvc — Values[0] is the one the warm phase
-	// measures; the upstream boost webhook polls the same URL.
-	targetURL := kubeapi.BuildKsvcStatusURL(event.Metadata.Namespace, targetKsvc, event.Spec.DurationPolicy.ApiCondition.Path)
-	expectedResponse := event.Spec.DurationPolicy.ApiCondition.Response
+	// measures. Uses WarmApiCondition (workload endpoint, status-code
+	// gate + optional body substring) so warm RT actually scales with
+	// CPU, instead of measuring /status flag-read latency.
+	warm := event.Spec.DurationPolicy.WarmApiCondition
+	targetURL := kubeapi.BuildKsvcStatusURL(event.Metadata.Namespace, targetKsvc, warm.Path)
 
 	logging.Info("[WARM] warmup curl before timed samples")
-	if _, err := triggerHttp(ctx, phaseWarm, targetURL, expectedResponse); err != nil {
+	if _, err := triggerHttpWithCodeBody(ctx, phaseWarm, targetURL, warm.StatusCode, warm.BodyContains); err != nil {
 		return ProbeStats{}, err
 	}
 
@@ -88,7 +90,7 @@ func getResptWarm(ctx context.Context, event *nimbusevent.NimbusEvent, cpuValue 
 	// end-of-loop. Released when this function returns (peak ~N*8 bytes).
 	samples := make([]time.Duration, 0, n)
 	for i := 0; i < n; i++ {
-		rt, err := triggerHttp(ctx, phaseWarm, targetURL, expectedResponse)
+		rt, err := triggerHttpWithCodeBody(ctx, phaseWarm, targetURL, warm.StatusCode, warm.BodyContains)
 		if err != nil {
 			return ProbeStats{}, err
 		}

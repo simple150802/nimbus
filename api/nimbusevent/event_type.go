@@ -231,9 +231,25 @@ type ResourceMinMax struct {
 
 // --- Duration Policy Tree ---
 type DurationPolicy struct {
-	ApiCondition ApiCondition `json:"apiCondition"`
+	// ColdApiCondition is the gate for the offline cold phase. The
+	// upstream kube-startup-cpu-boost webhook also polls this URL to
+	// decide when each boost ends. Renamed from the historical
+	// `apiCondition` field (single shared gate) when the warm phase got
+	// its own dedicated condition.
+	ColdApiCondition ApiCondition `json:"coldApiCondition"`
+
+	// WarmApiCondition is the gate for the offline warm phase. The
+	// previous design reused ColdApiCondition (a /status flag-read),
+	// which is CPU-independent and made warm-phase binary search
+	// converge on noise instead of signal. The warm phase now hits a
+	// real workload endpoint whose RT scales with CPU.
+	WarmApiCondition WarmApiCondition `json:"warmApiCondition"`
 }
 
+// ApiCondition is the historical cold-phase gate shape: GET <path> and
+// look for Response as a substring of the body. Preserved verbatim so
+// the cold-phase probe and the StartupCPUBoost CR (which polls the same
+// URL with the same body-substring rule) keep their existing semantics.
 type ApiCondition struct {
 	// Path is the URL path the controller GETs (e.g. "/status"). The full
 	// URL is constructed per ksvc via kubeapi.BuildKsvcStatusURL — see
@@ -241,4 +257,25 @@ type ApiCondition struct {
 	// CRD pattern).
 	Path     string `json:"path"`
 	Response string `json:"response"`
+}
+
+// WarmApiCondition is the warm-phase gate. Shape diverges from
+// ApiCondition because a workload endpoint's response body varies per
+// request — gating on a substring is fragile, so we gate primarily on
+// HTTP status code (StatusCode) with an optional defensive body-substring
+// check (BodyContains). Pass rule: actual code == StatusCode AND
+// (BodyContains == "" OR body contains it).
+type WarmApiCondition struct {
+	// Path is the URL path the controller GETs (e.g. "/detect/local").
+	// Must start with '/' (enforced by the CRD pattern).
+	Path string `json:"path"`
+
+	// StatusCode is the single HTTP status code that means "success".
+	// For an inference endpoint this is typically 200.
+	StatusCode int `json:"statusCode"`
+
+	// BodyContains is an optional defensive check. When non-empty, the
+	// response body must contain it. Useful when the upstream
+	// occasionally returns 200 with an error payload.
+	BodyContains string `json:"bodyContains,omitempty"`
 }

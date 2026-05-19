@@ -7,9 +7,10 @@ import "fmt"
 //
 //	http://<ksvcName>.<namespace>.svc.cluster.local<path>
 //
-// path is taken verbatim from spec.durationPolicy.apiCondition.path; the
-// CRD pattern guarantees it starts with '/'. Single source of truth so
-// probe_cold / probe_warm / buildBoostCR all derive the URL the same way.
+// path is taken verbatim from spec.durationPolicy.{cold,warm}ApiCondition.path
+// (caller picks which); the CRD pattern guarantees it starts with '/'.
+// Single source of truth so probe_cold / probe_warm / buildBoostCR all
+// derive the URL the same way.
 //
 // HTTPS, non-default ports, and non-standard cluster DNS suffixes are
 // out of scope — the thesis cluster uses the defaults. Add a scheme /

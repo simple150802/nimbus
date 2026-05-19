@@ -62,9 +62,9 @@ func getResptCold(ctx context.Context, event *nimbusevent.NimbusEvent, cpuValue 
 	defer kubeapi.DeleteStartupCPUBoost(ctx, event.Metadata.Namespace, boostName)
 
 	// targetURL is built from Values[0] (the one ksvc the cold phase
-	// measures) + the user-supplied apiCondition.path; the upstream boost
-	// webhook polls the same URL via its own probe.
-	targetURL := kubeapi.BuildKsvcStatusURL(event.Metadata.Namespace, targetKsvc, event.Spec.DurationPolicy.ApiCondition.Path)
+	// measures) + the user-supplied coldApiCondition.path; the upstream
+	// boost webhook polls the same URL via its own probe.
+	targetURL := kubeapi.BuildKsvcStatusURL(event.Metadata.Namespace, targetKsvc, event.Spec.DurationPolicy.ColdApiCondition.Path)
 
 	n := event.Spec.Measurement.ColdSamples
 	if n < 1 {
@@ -135,7 +135,7 @@ func coldSampleWithStuckRecovery(
 		go kubeapi.MonitorKsvcResources(monCtx, phaseCold, event.Metadata.Namespace, targetKsvc)
 
 		probeCtx, probeCancel := context.WithTimeout(ctx, probeTimeout)
-		rt, err := triggerHttp(probeCtx, phaseCold, targetURL, event.Spec.DurationPolicy.ApiCondition.Response)
+		rt, err := triggerHttp(probeCtx, phaseCold, targetURL, event.Spec.DurationPolicy.ColdApiCondition.Response)
 		probeCancel()
 		monCancel()
 

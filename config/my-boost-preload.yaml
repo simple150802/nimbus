@@ -42,7 +42,7 @@ spec:
   # actual results/ subdir before applying. Path-resolution rules are
   # identical to spec.export.dir (relative against cwd, absolute as-is).
   preMeasured:
-    loadFromDir: "../results/backup"
+    loadFromDir: "./results/backup"
 
   # Same workload definition as the export manifest — required fields. The
   # controller still creates the StartupCPUBoost CR + patches the ksvc CPU
@@ -58,9 +58,15 @@ spec:
           min: "300m"
           max: "1000m"
   durationPolicy:
-    apiCondition:
-      # Just the path. The controller builds the URL per ksvc as
-      # http://<ksvc>.<namespace>.svc.cluster.local<path>, so each
-      # ksvc in values[] is probed at its own URL.
+    # Cold gate — also written into the per-ksvc StartupCPUBoost CR.
+    coldApiCondition:
       path: "/status"
       response: "READY"
+    # Warm gate — workload endpoint so warm-phase RT actually scales
+    # with CPU. Required even for preload, since on apply the controller
+    # still creates StartupCPUBoost + patches ksvc CPU (these don't need
+    # warm probing, but the spec validation still requires the field).
+    warmApiCondition:
+      path: "/detect/local"
+      statusCode: 200
+      bodyContains: "\"success\":true"

@@ -48,6 +48,21 @@ func BinarySearch(ctx context.Context, current *nimbusevent.NimbusEvent, node st
 		current.PerNodeResults[node] = &nimbusevent.NodeResult{}
 	}
 
+	// Reset the ksvc's CPU limit to the search floor before probing. The
+	// upstream kube-startup-cpu-boost webhook only RAISES CPU at pod
+	// creation — if the ksvc carries a residual limit from a previous run
+	// (e.g. last run's runningCpu = 737m), every probe at a target below
+	// that value is silently skipped and the binary search converges on
+	// the residual instead of the requested CPU. Patching to the floor
+	// (resourceRange.limits.min) before each per-node search guarantees
+	// every probe in [Min, Max] satisfies the webhook's "target >= current"
+	// gate, so the boost actually applies. Cannot just remove limits —
+	// the boost project requires an existing limit to snapshot for revert.
+	floor := current.Spec.ResourcePolicy.ContainerPolicies[0].ResourceRange.Limits.Min
+	if err := kubeapi.PatchResourceLimits(ctx, ns, ksvc, floor); err != nil {
+		return "", fmt.Errorf("failed to reset ksvc cpu to floor before binary search: %w", err)
+	}
+
 	// Pin the ksvc to one pod for the whole search — both the starting and
 	// running phases need deterministic measurement, so neither should share
 	// traffic across multiple pods. Cleared on any exit path via defer so the

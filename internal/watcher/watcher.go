@@ -214,8 +214,11 @@ func (nw *NimbusWatcher) RunWorker(ctx context.Context) {
 }
 
 // validateNimbus rejects events that would panic the [0]-indexed code
-// downstream. The CRD schema already enforces these via `minItems: 1`,
-// so this is belt-and-suspenders for objects that somehow bypass it.
+// downstream. The CRD schema already enforces these via `minItems: 1`
+// and `required:`, so this is belt-and-suspenders for objects that
+// somehow bypass it. Cold-phase fields keep their existing implicit
+// trust (no new Go-side checks beyond what was here before); warm-phase
+// fields are new, so we explicitly verify them here too.
 func validateNimbus(ev *nimbusevent.NimbusEvent) error {
 	if len(ev.Selector.MatchExpressions) == 0 {
 		return fmt.Errorf("%s/%s: selector.matchExpressions is empty",
@@ -227,6 +230,14 @@ func validateNimbus(ev *nimbusevent.NimbusEvent) error {
 	}
 	if len(ev.Spec.ResourcePolicy.ContainerPolicies) == 0 {
 		return fmt.Errorf("%s/%s: spec.resourcePolicy.containerPolicies is empty",
+			ev.Metadata.Namespace, ev.Metadata.Name)
+	}
+	if ev.Spec.DurationPolicy.WarmApiCondition.Path == "" {
+		return fmt.Errorf("%s/%s: spec.durationPolicy.warmApiCondition.path is empty",
+			ev.Metadata.Namespace, ev.Metadata.Name)
+	}
+	if ev.Spec.DurationPolicy.WarmApiCondition.StatusCode <= 0 {
+		return fmt.Errorf("%s/%s: spec.durationPolicy.warmApiCondition.statusCode must be a positive HTTP code",
 			ev.Metadata.Namespace, ev.Metadata.Name)
 	}
 	return nil

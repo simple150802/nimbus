@@ -37,7 +37,7 @@ spec:
   # <dir>/<run-start-timestamp>/. Path is relative to the controller's
   # working directory.
   export:
-    dir: "../results"
+    dir: "./results"
 
   # Cold samples are expensive (each forces a scale-to-zero before a fresh
   # cold start). Omit `measurement` entirely to accept the CRD defaults
@@ -53,9 +53,14 @@ spec:
           min: "300m"
           max: "1000m"
   durationPolicy:
-    apiCondition:
-      # Just the path. The controller builds the URL per ksvc as
-      # http://<ksvc>.<namespace>.svc.cluster.local<path>, so each
-      # ksvc in values[] is probed at its own URL.
+    # Cold gate — also written into the per-ksvc StartupCPUBoost CR so
+    # the upstream kube-startup-cpu-boost webhook polls the same URL.
+    coldApiCondition:
       path: "/status"
       response: "READY"
+    # Warm gate — must hit a real workload endpoint so the binary search
+    # measures CPU-sensitive inference time, not /status flag-read.
+    warmApiCondition:
+      path: "/detect/local"
+      statusCode: 200
+      bodyContains: "\"success\":true"

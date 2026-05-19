@@ -34,7 +34,9 @@ func DeleteStartupCPUBoost(ctx context.Context, namespace string, name string) {
 // CreateStartupCPUBoost upserts ONE StartupCPUBoost CR per ksvc. The CR
 // is named "<nimbus-name>-<ksvcName>" with selector scoped to just this
 // ksvc, labels identifying the owning Nimbus, and an apiCondition.url
-// auto-built from the ksvc + namespace + spec.durationPolicy.apiCondition.path.
+// auto-built from the ksvc + namespace + spec.durationPolicy.coldApiCondition.path.
+// (The upstream boost CRD's field is still spelled "apiCondition"; we
+// only renamed the field on our side.)
 // Callers loop over selector.matchExpressions[0].values to fan out one
 // boost CR per ksvc; the upstream kube-startup-cpu-boost controller then
 // runs an independent boost lifecycle per ksvc.
@@ -76,11 +78,13 @@ func CreateStartupCPUBoost(ctx context.Context, event *nimbusevent.NimbusEvent, 
 // buildBoostCR constructs the StartupCPUBoost CR object for one ksvc.
 // The selector targets a single ksvc; the apiCondition.url is derived
 // per ksvc via BuildKsvcStatusURL so each boost CR's poll target matches
-// its own ksvc instance.
+// its own ksvc instance. The boost CR always uses the COLD condition —
+// the upstream webhook polls for pod-readiness, which is cold-phase by
+// definition.
 func buildBoostCR(event *nimbusevent.NimbusEvent, ksvcName, crName, cpuValue string) *unstructured.Unstructured {
 	expr := event.Selector.MatchExpressions[0]
 	policy := event.Spec.ResourcePolicy.ContainerPolicies[0]
-	cond := event.Spec.DurationPolicy.ApiCondition
+	cond := event.Spec.DurationPolicy.ColdApiCondition
 	ksvcURL := BuildKsvcStatusURL(event.Metadata.Namespace, ksvcName, cond.Path)
 
 	return &unstructured.Unstructured{
