@@ -14,12 +14,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// defaultBoostRequestCPU is the CPU `requests` value baked into every
-// StartupCPUBoost CR we create. limits varies per probe; requests stays
-// fixed because the upstream webhook doesn't surface it through the
-// Nimbus CRD.
-const defaultBoostRequestCPU = "150m"
-
 // DeleteStartupCPUBoost removes the StartupCPUBoost CR named name from
 // namespace. Errors are logged, not returned — callers treat cleanup as
 // best-effort.
@@ -115,7 +109,12 @@ func buildBoostCR(event *nimbusevent.NimbusEvent, ksvcName, crName, cpuValue str
 						{
 							"containerName": policy.ContainerName,
 							"fixedResources": map[string]interface{}{
-								"requests": defaultBoostRequestCPU,
+								// requests == limits → Guaranteed QoS during
+								// the boost window. Predictable bin-packing
+								// (scheduler reserves cpuValue, not a floor)
+								// and the pod is never throttled below the
+								// probed CPU under contention.
+								"requests": cpuValue,
 								"limits":   cpuValue,
 							},
 						},

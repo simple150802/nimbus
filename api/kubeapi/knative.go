@@ -65,16 +65,26 @@ func MonitorKsvcResources(ctx context.Context, phase, namespace, ksvcName string
 	}
 }
 
-// PatchResourceLimits updates the CPU limit on a Knative Service's
-// container[0] via a JSON-patch replace. Logs the set event so the user can
-// trace when a new CPU limit actually hits the ksvc.
+// PatchResourceLimits sets the CPU value on a Knative Service's
+// container[0] for BOTH limits and requests, keeping them equal so the
+// resulting pod is Guaranteed QoS — predictable bin-packing (scheduler
+// reserves the full value, not a smaller floor) and the pod is never
+// throttled below the converged CPU under contention. `add` ops are used
+// instead of `replace` so the patch works whether or not the manifest
+// already had a requests.cpu field. Logs the set event so the user can
+// trace when the value actually hits the ksvc.
 func PatchResourceLimits(ctx context.Context, namespace, ksvcName, cpuLimit string) error {
-	logging.Info(fmt.Sprintf("[set] ksvc cpu limit -> ns=%s ksvc=%s cpu=%s", namespace, ksvcName, cpuLimit))
+	logging.Info(fmt.Sprintf("[set] ksvc cpu (request=limit) -> ns=%s ksvc=%s cpu=%s", namespace, ksvcName, cpuLimit))
 
 	patchPayload := []map[string]interface{}{
 		{
-			"op":    "replace",
+			"op":    "add",
 			"path":  "/spec/template/spec/containers/0/resources/limits/cpu",
+			"value": cpuLimit,
+		},
+		{
+			"op":    "add",
+			"path":  "/spec/template/spec/containers/0/resources/requests/cpu",
 			"value": cpuLimit,
 		},
 	}
