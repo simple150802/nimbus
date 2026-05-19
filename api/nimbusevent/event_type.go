@@ -125,6 +125,83 @@ type NimbusStatus struct {
 	// derived from this map and are purely observational — the runtime
 	// path computes max on the fly when applying values.
 	PerNode map[string]NodeResult `json:"perNode,omitempty"`
+
+	// Online is the online-stage reconciler's output. Populated only after
+	// offline saturation; absent (nil) while the offline binary search is
+	// still running or has nothing to consume. One assignment row per ksvc
+	// listed in spec.selector.matchExpressions[0].values.
+	Online *OnlineStatus `json:"online,omitempty"`
+}
+
+// Tier identifies which performance band a ksvc was assigned to. Mirrors
+// the CRD enum on status.online.assignments[].tier.
+const (
+	// TierCOpt is the offline-converged knee/optimal CPU per node — the
+	// highest tier; consumes the most headroom but gives the best RT.
+	TierCOpt = "c_opt"
+	// TierCMin is the smallest sampled CPU still meeting
+	// spec.acceptableResponseTime. Available only when that field is set;
+	// otherwise the waterfall degenerates to c_opt -> c_floor.
+	TierCMin = "c_min"
+	// TierCFloor is the configured CPU floor from
+	// spec.resourcePolicy...limits.min. No SLO guarantee; assigned only
+	// when c_opt and c_min don't fit anywhere with available headroom.
+	TierCFloor = "c_floor"
+)
+
+// OnlineStatus is the .status.online subtree — the online reconciler's
+// output. Written once per reconcile after offline is saturated. Old
+// rows are replaced wholesale, not merged.
+type OnlineStatus struct {
+	// ActiveAssignments equals len(Assignments). Exposed as a top-level
+	// field so `kubectl get -o wide` and quick health checks can read it
+	// without parsing the array.
+	ActiveAssignments int `json:"activeAssignments"`
+
+	// Assignments is one row per managed ksvc, in the order they appear
+	// in spec.selector.matchExpressions[0].values. A ksvc is omitted only
+	// when it does not exist in the cluster; otherwise a row is produced
+	// even when the only feasible assignment is c_floor with degraded=true.
+	Assignments []OnlineAssignment `json:"assignments,omitempty"`
+}
+
+// OnlineAssignment is the policy assigned to one ksvc by the waterfall
+// scheduler. The Ksvc + Node + Tier triple is the primary key for joining
+// experiment-script CSV rows back to the controller's decision.
+type OnlineAssignment struct {
+	// Ksvc is the Knative service name this row describes. Always one of
+	// spec.selector.matchExpressions[0].values.
+	Ksvc string `json:"ksvc"`
+
+	// Node is the Kubernetes node chosen for this ksvc. Written to the
+	// ksvc as spec.template.spec.nodeSelector["kubernetes.io/hostname"].
+	Node string `json:"node"`
+
+	// Tier is one of TierCOpt / TierCMin / TierCFloor. See those constants
+	// for the per-tier source rules.
+	Tier string `json:"tier"`
+
+	// StartingCpu is the cold-phase CPU written into the per-ksvc
+	// StartupCPUBoost CR. k8s-quantity string ("931m", "1500m").
+	StartingCpu string `json:"startingCpu"`
+
+	// RunningCpu is the steady-state CPU patched onto the ksvc itself.
+	// Always <= StartingCpu.
+	RunningCpu string `json:"runningCpu"`
+
+	// Degraded is true only when the waterfall ran out of headroom and
+	// admitted this ksvc at TierCFloor on the least-loaded node.
+	Degraded bool `json:"degraded,omitempty"`
+
+	// Ready mirrors the target ksvc's Ready condition at the last
+	// reconcile. ready=false means the patch landed but the ksvc didn't
+	// come up healthy under the assigned CPU.
+	Ready bool `json:"ready,omitempty"`
+
+	// URL is the cluster-internal URL for this ksvc, built via
+	// kubeapi.BuildKsvcStatusURL. Cached on status so the experiment
+	// script doesn't need a separate kubectl-get-ksvc per row.
+	URL string `json:"url,omitempty"`
 }
 
 // ---------------------------------------------------------
