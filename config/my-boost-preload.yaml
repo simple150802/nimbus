@@ -53,10 +53,11 @@ spec:
   resourcePolicy:
     containerPolicies:
     - containerName: user-container
-      resourceRange:
-        limits:
-          min: "300m"
-          max: "1000m"
+      # Economic ceiling — same as the export manifest (it must match
+      # the cpuBudget the loaded run was measured under; otherwise the
+      # loaded c_opt / c_min values are semantically incorrect for the
+      # current run).
+      cpuBudget: "1000m"
   durationPolicy:
     # Cold gate — also written into the per-ksvc StartupCPUBoost CR.
     coldApiCondition:

@@ -35,9 +35,11 @@ type nodeResultFile struct {
 	Node                 string                    `json:"node"`
 	StartingCpu          string                    `json:"startingCpu,omitempty"`
 	StartingRt           *nimbusevent.RtStats      `json:"startingRt,omitempty"`
+	CMinStarting         string                    `json:"cMinStarting,omitempty"`
 	ColdRtSamples        []nimbusevent.SamplePoint `json:"coldRtSamples,omitempty"`
 	RunningCpu           string                    `json:"runningCpu,omitempty"`
 	RunningRt            *nimbusevent.RtStats      `json:"runningRt,omitempty"`
+	CMinRunning          string                    `json:"cMinRunning,omitempty"`
 	WarmRtSamples        []nimbusevent.SamplePoint `json:"warmRtSamples,omitempty"`
 	ColdPhaseCompletedAt string                    `json:"cold_phase_completed_at,omitempty"`
 	WarmPhaseCompletedAt string                    `json:"warm_phase_completed_at,omitempty"`
@@ -151,9 +153,11 @@ func ReadRunDir(loadFromDir string) (map[string]*nimbusevent.NodeResult, error) 
 		out[nodeName] = &nimbusevent.NodeResult{
 			StartingCpu:       nrf.StartingCpu,
 			StartingRt:        nrf.StartingRt,
+			CMinStarting:      nrf.CMinStarting,
 			ColdRtSamples:     cold,
 			RunningCpu:        nrf.RunningCpu,
 			RunningRt:         nrf.RunningRt,
+			CMinRunning:       nrf.CMinRunning,
 			WarmRtSamples:     warm,
 			StartingSaturated: true,
 			RunningSaturated:  true,

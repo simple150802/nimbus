@@ -15,12 +15,6 @@ type NimbusEvent struct {
 
 	Next *NimbusEvent `json:"-"`
 
-	// High / Low are scratchpad bounds for the active binary-search loop.
-	// They are reset at the top of each per-phase wrapper, so reusing the
-	// same fields across nodes in a per-node loop is safe.
-	High string `json:"-"`
-	Low  string `json:"-"`
-
 	// CandidateNodes is the list of cluster nodes the target ksvc is
 	// eligible to run on, given its nodeSelector + nodeAffinity +
 	// tolerations. Populated once when the event enters the worker, sorted
@@ -71,10 +65,23 @@ type NimbusEvent struct {
 // CPU, what's the p95 latency?") without re-deriving from the sample
 // list.
 type NodeResult struct {
-	StartingCpu       string        `json:"startingCpu,omitempty"`
-	StartingRt        *RtStats      `json:"startingRt,omitempty"`
-	RunningCpu        string        `json:"runningCpu,omitempty"`
-	RunningRt         *RtStats      `json:"runningRt,omitempty"`
+	// StartingCpu / RunningCpu are c_opt — the latency-plateau edge — for
+	// the cold and warm phases respectively, computed by the offline binary
+	// search per node.
+	StartingCpu string   `json:"startingCpu,omitempty"`
+	StartingRt  *RtStats `json:"startingRt,omitempty"`
+	RunningCpu  string   `json:"runningCpu,omitempty"`
+	RunningRt   *RtStats `json:"runningRt,omitempty"`
+
+	// CMinStarting / CMinRunning are c_min — the smallest probed CPU at
+	// which the gate metric meets spec.acceptableResponseTime — for the
+	// cold and warm phases. Derived by DeriveMin from the corresponding
+	// sample list at end-of-phase. Empty string means "no probed sample
+	// met the SLO budget" (or spec.acceptableResponseTime.<phase> was
+	// absent for this phase). Consumed by the online stage's waterfall.
+	CMinStarting string `json:"cMinStarting,omitempty"`
+	CMinRunning  string `json:"cMinRunning,omitempty"`
+
 	ColdRtSamples     []SamplePoint `json:"coldRtSamples,omitempty"`
 	WarmRtSamples     []SamplePoint `json:"warmRtSamples,omitempty"`
 	StartingSaturated bool          `json:"-"`
@@ -134,19 +141,18 @@ type NimbusStatus struct {
 }
 
 // Tier identifies which performance band a ksvc was assigned to. Mirrors
-// the CRD enum on status.online.assignments[].tier.
+// the CRD enum on status.online.assignments[].tier. Per future_plan.md
+// §6, only two tiers exist — there is no "c_floor" fallback; when
+// neither c_opt nor c_min fits, the online /decide call returns Pending
+// (KPA aborts the scale-up) rather than admitting at a sub-c_min CPU.
 const (
 	// TierCOpt is the offline-converged knee/optimal CPU per node — the
 	// highest tier; consumes the most headroom but gives the best RT.
 	TierCOpt = "c_opt"
 	// TierCMin is the smallest sampled CPU still meeting
-	// spec.acceptableResponseTime. Available only when that field is set;
-	// otherwise the waterfall degenerates to c_opt -> c_floor.
+	// spec.acceptableResponseTime. Derived from the offline sample list
+	// via DeriveMin. NIMBUS's fallback tier when c_opt doesn't fit.
 	TierCMin = "c_min"
-	// TierCFloor is the configured CPU floor from
-	// spec.resourcePolicy...limits.min. No SLO guarantee; assigned only
-	// when c_opt and c_min don't fit anywhere with available headroom.
-	TierCFloor = "c_floor"
 )
 
 // OnlineStatus is the .status.online subtree — the online reconciler's
@@ -177,8 +183,10 @@ type OnlineAssignment struct {
 	// ksvc as spec.template.spec.nodeSelector["kubernetes.io/hostname"].
 	Node string `json:"node"`
 
-	// Tier is one of TierCOpt / TierCMin / TierCFloor. See those constants
-	// for the per-tier source rules.
+	// Tier is one of TierCOpt / TierCMin. See those constants for the
+	// per-tier source rules. There is no c_floor tier — when neither
+	// c_opt nor c_min fits, /decide returns Pending (KPA aborts the
+	// scale-up) rather than admitting at a sub-c_min CPU.
 	Tier string `json:"tier"`
 
 	// StartingCpu is the cold-phase CPU written into the per-ksvc
@@ -189,8 +197,11 @@ type OnlineAssignment struct {
 	// Always <= StartingCpu.
 	RunningCpu string `json:"runningCpu"`
 
-	// Degraded is true only when the waterfall ran out of headroom and
-	// admitted this ksvc at TierCFloor on the least-loaded node.
+	// Degraded is set when /decide refused to assign at any tier
+	// (neither c_opt nor c_min fit anywhere with available headroom).
+	// The online status row still gets emitted for traceability — Tier
+	// will be "" and the experiment script can correlate degraded
+	// assignments with SLO breaches in its CSV output.
 	Degraded bool `json:"degraded,omitempty"`
 
 	// Ready mirrors the target ksvc's Ready condition at the last
@@ -292,18 +303,16 @@ type ResourcePolicy struct {
 	ContainerPolicies []ContainerPolicy `json:"containerPolicies"`
 }
 
+// ContainerPolicy is the per-container CPU budget input. The binary
+// search anchors at CpuBudget (the economic ceiling) and bisects
+// downward to discover c_opt and c_min — the operator does not supply
+// a lower bound; the algorithm's resolution floor + a hardcoded safety
+// floor (MinProbeCpuMilli) handle that.
 type ContainerPolicy struct {
-	ContainerName string        `json:"containerName"`
-	ResourceRange ResourceRange `json:"resourceRange"`
-}
-
-type ResourceRange struct {
-	Limits ResourceMinMax `json:"limits"`
-}
-
-type ResourceMinMax struct {
-	Min string `json:"min"`
-	Max string `json:"max"`
+	ContainerName string `json:"containerName"`
+	// CpuBudget is the maximum CPU per ksvc NIMBUS will ever assign for
+	// this container. Kubernetes-quantity string (e.g. "2", "2000m").
+	CpuBudget string `json:"cpuBudget"`
 }
 
 // --- Duration Policy Tree ---

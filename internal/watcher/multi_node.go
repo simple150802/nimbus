@@ -172,10 +172,12 @@ func applyPreMeasured(current *nimbusevent.NimbusEvent) bool {
 		} else {
 			existing.StartingCpu = preLoaded.StartingCpu
 			existing.StartingRt = preLoaded.StartingRt
+			existing.CMinStarting = preLoaded.CMinStarting
 			existing.ColdRtSamples = preLoaded.ColdRtSamples
 			existing.StartingSaturated = preLoaded.StartingSaturated
 			existing.RunningCpu = preLoaded.RunningCpu
 			existing.RunningRt = preLoaded.RunningRt
+			existing.CMinRunning = preLoaded.CMinRunning
 			existing.WarmRtSamples = preLoaded.WarmRtSamples
 			existing.RunningSaturated = preLoaded.RunningSaturated
 		}

@@ -48,10 +48,11 @@ spec:
   resourcePolicy:
     containerPolicies:
     - containerName: user-container
-      resourceRange:
-        limits:
-          min: "300m"
-          max: "1000m"
+      # Economic ceiling — NIMBUS bisects downward from this value to
+      # discover c_opt and c_min. The operator does not supply a lower
+      # bound; the algorithm's resolution threshold (100m) and safety
+      # floor (50m) terminate the search.
+      cpuBudget: "1000m"
   durationPolicy:
     # Cold gate — also written into the per-ksvc StartupCPUBoost CR so
     # the upstream kube-startup-cpu-boost webhook polls the same URL.

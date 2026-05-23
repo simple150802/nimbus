@@ -15,12 +15,6 @@ import (
 )
 
 const (
-	// runningPhaseLowOffsetMilli is the milli-CPU offset applied to the
-	// spec's min when seeding the running-phase search lower bound. The
-	// running-phase optimum is allowed to dip below the starting-phase
-	// minimum, so we extend the range slightly downward.
-	runningPhaseLowOffsetMilli = -50
-
 	// convergenceThresholdMilli stops the binary search when high - low
 	// drops below this threshold (milli-CPU). 100m corresponds to roughly
 	// the granularity Kubernetes' scheduler can act on.
@@ -30,6 +24,17 @@ const (
 	// response time needed to justify moving the lower bound up rather
 	// than narrowing toward the upper bound. 0.10 == 10%.
 	responseTimeImprovementGate = 0.10
+
+	// floorResetCpu is the CPU value the ksvc spec is reset to before
+	// each per-node binary search. The upstream kube-startup-cpu-boost
+	// webhook only RAISES CPU at pod creation; if the ksvc carries a
+	// residual limit from a previous run, every probe at a target below
+	// that value is silently skipped. Patching to a value strictly below
+	// minProbeCpuMilli guarantees every in-range probe satisfies the
+	// webhook's "target >= current" gate. 10m is safe — the search will
+	// never target this low (the safety floor catches us at
+	// minProbeCpuMilli).
+	floorResetCpu = "10m"
 )
 
 // BinarySearch runs both phases of the CPU search for a single candidate
@@ -48,19 +53,15 @@ func BinarySearch(ctx context.Context, current *nimbusevent.NimbusEvent, node st
 		current.PerNodeResults[node] = &nimbusevent.NodeResult{}
 	}
 
-	// Reset the ksvc's CPU limit to the search floor before probing. The
-	// upstream kube-startup-cpu-boost webhook only RAISES CPU at pod
-	// creation — if the ksvc carries a residual limit from a previous run
-	// (e.g. last run's runningCpu = 737m), every probe at a target below
-	// that value is silently skipped and the binary search converges on
-	// the residual instead of the requested CPU. Patching to the floor
-	// (resourceRange.limits.min) before each per-node search guarantees
-	// every probe in [Min, Max] satisfies the webhook's "target >= current"
-	// gate, so the boost actually applies. Cannot just remove limits —
-	// the boost project requires an existing limit to snapshot for revert.
-	floor := current.Spec.ResourcePolicy.ContainerPolicies[0].ResourceRange.Limits.Min
-	if err := kubeapi.PatchResourceLimits(ctx, ns, ksvc, floor); err != nil {
-		return "", fmt.Errorf("failed to reset ksvc cpu to floor before binary search: %w", err)
+	// Reset the ksvc's CPU limit before probing. The upstream
+	// kube-startup-cpu-boost webhook only RAISES CPU at pod creation —
+	// without a low residual value, in-range probes can be silently
+	// skipped. floorResetCpu is intentionally below minProbeCpuMilli so
+	// every probe in the active search satisfies the webhook's
+	// "target >= current" gate. Cannot just remove limits — the boost
+	// project requires an existing limit to snapshot for revert.
+	if err := kubeapi.PatchResourceLimits(ctx, ns, ksvc, floorResetCpu); err != nil {
+		return "", fmt.Errorf("failed to reset ksvc cpu before binary search: %w", err)
 	}
 
 	// Pin the ksvc to one pod for the whole search — both the starting and
@@ -84,10 +85,10 @@ func BinarySearch(ctx context.Context, current *nimbusevent.NimbusEvent, node st
 	}
 
 	result := current.PerNodeResults[node]
-	logging.Info(fmt.Sprintf("[node=%s] starting CPU: %s | running CPU: %s",
-		node, result.StartingCpu, result.RunningCpu))
+	logging.Info(fmt.Sprintf("[node=%s] cold c_opt=%s c_min=%s | warm c_opt=%s c_min=%s",
+		node, result.StartingCpu, result.CMinStarting, result.RunningCpu, result.CMinRunning))
 
-	return current.High, nil
+	return result.RunningCpu, nil
 }
 
 // probeFn is a phase-agnostic measurement primitive. The starting phase
@@ -98,36 +99,50 @@ func BinarySearch(ctx context.Context, current *nimbusevent.NimbusEvent, node st
 // ride along for the recordSample callback to persist.
 type probeFn func(ctx context.Context, current *nimbusevent.NimbusEvent, cpu string) (ProbeStats, error)
 
-// runBinarySearch is the shared convergence loop used by both phases.
-// It walks the [low, high] window, asking probe() for the response time
-// at low, mid, and high, and chooses which bound to move based on the
-// 10% improvement gate over the metric named in current.Spec.Metric
-// (defaults to p95 via metricGate). Stops when high - low <=
-// convergenceThresholdMilli. On success it writes setResult(current.High)
-// and returns current.High.
+// runBinarySearch is the shared per-phase search loop. It bisects over
+// [low=0, high=cpuBudget] until the bracket falls below
+// convergenceThresholdMilli (resolution stop) OR the next midpoint
+// would fall below minProbeCpuMilli (safety floor stop). The invariant
+// throughout: `high` is the smallest CPU known to be ON the plateau,
+// `low` is the largest CPU known to be OFF the plateau (or 0 if the
+// plateau hasn't been left yet). c_opt = high at exit.
 //
-// recordSample is invoked once per probe call with the (cpu, stats) pair
-// the probe just measured. The per-phase wrapper appends these into the
-// active node's ColdRtSamples / WarmRtSamples slice with all three
-// percentiles preserved; runBinarySearch itself stays storage-agnostic.
+// Before the loop, runBinarySearch probes at cpuBudget once as a
+// feasibility check — if the gate metric there exceeds sloRtMillis,
+// it logs a warning but doesn't abort (c_opt is still a useful
+// number; c_min for this phase will end up "" via deriveMin since
+// no sample meets the SLO).
+//
+// recordSample is invoked once per UNIQUE probed CPU (cache hits don't
+// re-record). The caller's recordSample appends into the active node's
+// ColdRtSamples / WarmRtSamples slice — runBinarySearch stays
+// storage-agnostic.
+//
+// setOpt is invoked once at end-of-loop with the converged c_opt CPU.
+// The caller uses it to write nr.StartingCpu / nr.RunningCpu.
+//
+// `sloRtMillis = 0` means "no SLO budget for this phase"
+// (spec.acceptableResponseTime.<phase> absent) — the feasibility-check
+// warning is suppressed and c_min derivation by the caller will return
+// "" via deriveMin.
 func runBinarySearch(
 	ctx context.Context,
 	current *nimbusevent.NimbusEvent,
 	probe probeFn,
-	setResult func(cpu string),
+	cpuBudget string,
+	sloRtMillis int64,
+	setOpt func(cpu string),
 	recordSample func(cpu string, stats ProbeStats),
 ) (string, error) {
 	gate := metricGate(current.Spec.Metric)
-	logging.Info(fmt.Sprintf("Binary search gating on metric=%s", resolvedMetric(current.Spec.Metric)))
+	logging.Info(fmt.Sprintf("runBinarySearch gating on metric=%s, cpuBudget=%s, slo=%dms",
+		resolvedMetric(current.Spec.Metric), cpuBudget, sloRtMillis))
 
 	// probeOnce memoizes probe() by CPU for the lifetime of this
-	// runBinarySearch call. The loop below re-references current.Low
-	// and current.High across iterations; without this cache, every
-	// iteration where rtMid beats rtLow re-probes current.High from
-	// scratch (~30–90 s per cold probe). Caching per phase is safe
-	// because measurement conditions don't change inside one phase.
-	// recordSample is folded inside so cache hits don't duplicate
-	// sample rows in PerNodeResults — the sample list ends up with
+	// runBinarySearch call. Per phase. Repeated probes at the same CPU
+	// (most importantly the high-side every iteration of bisect) are
+	// free after the first one. recordSample is folded inside so cache
+	// hits don't duplicate sample rows — the sample list ends up with
 	// exactly one entry per unique probed CPU.
 	cache := make(map[string]ProbeStats)
 	probeOnce := func(cpu string) (ProbeStats, error) {
@@ -144,59 +159,89 @@ func runBinarySearch(
 		return stats, nil
 	}
 
-	statsLow, err := probeOnce(current.Low)
+	// Step 1 — feasibility check at the ceiling. Informational only;
+	// don't abort the search. c_min derivation by the caller signals
+	// SLO infeasibility via empty-string return.
+	statsBudget, err := probeOnce(cpuBudget)
 	if err != nil {
 		return "", err
 	}
-	rtLow := gate(statsLow)
+	if sloRtMillis > 0 && gate(statsBudget).Milliseconds() > sloRtMillis {
+		logging.Warning(fmt.Sprintf(
+			"SLO unachievable at cpuBudget=%s — gate=%dms > slo=%dms; c_min for this phase will be empty",
+			cpuBudget, gate(statsBudget).Milliseconds(), sloRtMillis,
+		))
+	}
+
+	// Step 2 — unified bisect over [low=0, high=cpuBudget].
+	low := "0"
+	high := cpuBudget
 
 	for {
-		shouldContinue, err := kubeapi.IsDiffGreaterThresh(current.Low, current.High, convergenceThresholdMilli)
+		// Resolution stop — gap is fine enough; high is our answer.
+		shouldContinue, err := kubeapi.IsDiffGreaterThresh(low, high, convergenceThresholdMilli)
 		if err != nil {
-			logging.Failure("Error calculating threshold:", err)
-			return "", err
+			return "", fmt.Errorf("calculating bracket threshold: %w", err)
 		}
 		if !shouldContinue {
-			logging.Success(fmt.Sprintf("Binary Search Complete! The optimal CPU limit is: %s", current.High))
-			setResult(current.High)
-			return current.High, nil
+			break
 		}
 
-		midCPU, err := kubeapi.CalculateAverageCPU(current.Low, current.High)
+		midCpu, err := kubeapi.CalculateAverageCPU(low, high)
 		if err != nil {
-			logging.Failure("Invalid CPU units:", err)
-			return "", err
+			return "", fmt.Errorf("calculating mid: %w", err)
 		}
-		logging.Info("Checking at", midCPU, "CPU ...")
 
-		statsMid, err := probeOnce(midCPU)
+		// Safety-floor stop — refuse to probe at potentially-crash CPU.
+		midQty, err := resource.ParseQuantity(midCpu)
+		if err != nil {
+			return "", fmt.Errorf("parsing mid %q: %w", midCpu, err)
+		}
+		if midQty.MilliValue() < minProbeCpuMilli {
+			logging.Warning(fmt.Sprintf(
+				"runBinarySearch safety floor hit: midpoint %s < %dm — stopping with c_opt=%s",
+				midCpu, minProbeCpuMilli, high,
+			))
+			break
+		}
+
+		logging.Info("Checking at " + midCpu + " CPU ...")
+
+		statsMid, err := probeOnce(midCpu)
 		if err != nil {
 			return "", err
 		}
 		rtMid := gate(statsMid)
 
-		if float64(rtLow-rtMid)/float64(rtLow) > responseTimeImprovementGate {
-			statsHigh, err := probeOnce(current.High)
-			if err != nil {
-				return "", err
-			}
-			rtHigh := gate(statsHigh)
-			if float64(rtMid-rtHigh)/float64(rtMid) > responseTimeImprovementGate {
-				current.Low = midCPU
-				rtLow = rtMid
-			} else {
-				current.High = midCPU
-			}
+		// rtHigh comes from the cache after the first iteration (high
+		// only narrows when we already probed it as a previous mid).
+		statsHigh, err := probeOnce(high)
+		if err != nil {
+			return "", err
+		}
+		rtHigh := gate(statsHigh)
+
+		improvement := float64(rtMid-rtHigh) / float64(rtMid)
+		if improvement >= responseTimeImprovementGate {
+			// mid is meaningfully worse than high → mid is OFF plateau.
+			// c_opt is in (mid, high]; move low up to mid.
+			low = midCpu
 		} else {
-			current.High = midCPU
+			// mid is ~equal to high → mid is ON plateau.
+			// c_opt ≤ mid; narrow high down to mid.
+			high = midCpu
 		}
 	}
+
+	logging.Success(fmt.Sprintf("runBinarySearch complete: c_opt=%s", high))
+	setOpt(high)
+	return high, nil
 }
 
 // sortSamplesByCpu canonicalizes a sample list so the persisted order
-// matches what the online stage's piecewise-linear interpolator expects
-// (ascending cpu). Called once at end-of-phase, after all samples for
-// a (node, phase) tuple have been collected.
+// matches what the online stage's piecewise-linear interpolator and the
+// deriveMin walk both expect (ascending cpu). Called once at end-of-phase,
+// after all samples for a (node, phase) tuple have been collected.
 func sortSamplesByCpu(samples []nimbusevent.SamplePoint) {
 	sort.Slice(samples, func(i, j int) bool {
 		qi, errI := resource.ParseQuantity(samples[i].Cpu)
@@ -227,9 +272,9 @@ func makeSampleSink(current *nimbusevent.NimbusEvent, node, phase, cpu string) S
 }
 
 // latestSampleAt returns the most-recently-recorded SamplePoint at the
-// given cpu in the supplied list, or nil if none exists. The binary
-// search may re-probe the same cpu in later iterations; the latest entry
-// is the most representative for saturation-stat lookup.
+// given cpu in the supplied list, or nil if none exists. With probeOnce
+// caching there should be exactly one entry per CPU, but the linear
+// scan stays robust against pre-cache call sites.
 func latestSampleAt(samples []nimbusevent.SamplePoint, cpu string) *nimbusevent.SamplePoint {
 	for i := len(samples) - 1; i >= 0; i-- {
 		if samples[i].Cpu == cpu {
@@ -253,13 +298,17 @@ func rtStatsFromSample(s *nimbusevent.SamplePoint) *nimbusevent.RtStats {
 }
 
 func binarySearchForStartingPhase(ctx context.Context, current *nimbusevent.NimbusEvent, node string) (string, error) {
-	current.Low = current.Spec.ResourcePolicy.ContainerPolicies[0].ResourceRange.Limits.Min
-	current.High = current.Spec.ResourcePolicy.ContainerPolicies[0].ResourceRange.Limits.Max
+	cpuBudget := current.Spec.ResourcePolicy.ContainerPolicies[0].CpuBudget
+
+	var sloCold int64
+	if current.Spec.AcceptableResponseTime != nil {
+		sloCold = current.Spec.AcceptableResponseTime.Cold
+	}
 
 	probe := func(ctx context.Context, ev *nimbusevent.NimbusEvent, cpu string) (ProbeStats, error) {
 		return getResptCold(ctx, ev, cpu, makeSampleSink(ev, node, "cold", cpu))
 	}
-	setResult := func(cpu string) {
+	setOpt := func(cpu string) {
 		nr := current.PerNodeResults[node]
 		nr.StartingCpu = cpu
 		nr.StartingSaturated = true
@@ -276,24 +325,40 @@ func binarySearchForStartingPhase(ctx context.Context, current *nimbusevent.Nimb
 			},
 		)
 	}
-	cpu, err := runBinarySearch(ctx, current, probe, setResult, recordSample)
-	sortSamplesByCpu(current.PerNodeResults[node].ColdRtSamples)
-	return cpu, err
-}
 
-func binarySearchForRunningPhase(ctx context.Context, current *nimbusevent.NimbusEvent, node string) (string, error) {
-	current.Low = current.Spec.ResourcePolicy.ContainerPolicies[0].ResourceRange.Limits.Min
-	runningLow, err := kubeapi.AdjustCPUMilli(current.Low, runningPhaseLowOffsetMilli)
+	cOpt, err := runBinarySearch(ctx, current, probe, cpuBudget, sloCold, setOpt, recordSample)
 	if err != nil {
 		return "", err
 	}
-	current.Low = runningLow
-	current.High = current.PerNodeResults[node].StartingCpu
+
+	// End-of-phase: sort samples ascending by CPU (required by deriveMin
+	// and by online-stage interpolation), then derive c_min from the
+	// sorted curve.
+	nr := current.PerNodeResults[node]
+	sortSamplesByCpu(nr.ColdRtSamples)
+	nr.CMinStarting = deriveMin(nr.ColdRtSamples, current.Spec.Metric, sloCold)
+	if sloCold > 0 && nr.CMinStarting == "" {
+		logging.Warning(fmt.Sprintf(
+			"node=%s cold phase: no probed CPU met SLO=%dms — c_min_cold left empty",
+			node, sloCold,
+		))
+	}
+
+	return cOpt, nil
+}
+
+func binarySearchForRunningPhase(ctx context.Context, current *nimbusevent.NimbusEvent, node string) (string, error) {
+	cpuBudget := current.Spec.ResourcePolicy.ContainerPolicies[0].CpuBudget
+
+	var sloWarm int64
+	if current.Spec.AcceptableResponseTime != nil {
+		sloWarm = current.Spec.AcceptableResponseTime.Warm
+	}
 
 	probe := func(ctx context.Context, ev *nimbusevent.NimbusEvent, cpu string) (ProbeStats, error) {
-		return getResptWarm(ctx, ev, cpu, current.High, makeSampleSink(ev, node, "warm", cpu))
+		return getResptWarm(ctx, ev, cpu, cpuBudget, makeSampleSink(ev, node, "warm", cpu))
 	}
-	setResult := func(cpu string) {
+	setOpt := func(cpu string) {
 		nr := current.PerNodeResults[node]
 		nr.RunningCpu = cpu
 		nr.RunningSaturated = true
@@ -310,7 +375,21 @@ func binarySearchForRunningPhase(ctx context.Context, current *nimbusevent.Nimbu
 			},
 		)
 	}
-	cpu, err := runBinarySearch(ctx, current, probe, setResult, recordSample)
-	sortSamplesByCpu(current.PerNodeResults[node].WarmRtSamples)
-	return cpu, err
+
+	cOpt, err := runBinarySearch(ctx, current, probe, cpuBudget, sloWarm, setOpt, recordSample)
+	if err != nil {
+		return "", err
+	}
+
+	nr := current.PerNodeResults[node]
+	sortSamplesByCpu(nr.WarmRtSamples)
+	nr.CMinRunning = deriveMin(nr.WarmRtSamples, current.Spec.Metric, sloWarm)
+	if sloWarm > 0 && nr.CMinRunning == "" {
+		logging.Warning(fmt.Sprintf(
+			"node=%s warm phase: no probed CPU met SLO=%dms — c_min_warm left empty",
+			node, sloWarm,
+		))
+	}
+
+	return cOpt, nil
 }

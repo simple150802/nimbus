@@ -166,28 +166,25 @@ spec:
                       minItems: 1
                       items:
                         type: object
-                        required: [containerName, resourceRange]
+                        required: [containerName, cpuBudget]
                         properties:
                           containerName:
                             description: Name of the container inside the pod (e.g. "user-container").
                             type: string
-                          resourceRange:
-                            description: CPU bounds the binary search will probe within.
-                            type: object
-                            required: [limits]
-                            properties:
-                              limits:
-                                type: object
-                                required: [min, max]
-                                properties:
-                                  min:
-                                    description: Lower bound of the CPU search range (Kubernetes quantity, e.g. "200m").
-                                    type: string
-                                    pattern: "^(\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))))?$"
-                                  max:
-                                    description: Upper bound of the CPU search range (Kubernetes quantity, e.g. "2" or "2000m").
-                                    type: string
-                                    pattern: "^(\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))))?$"
+                          cpuBudget:
+                            description: |
+                              The economic ceiling — the maximum CPU per ksvc the
+                              operator is willing to pay for. NIMBUS never assigns
+                              more than this. The binary search anchors at this
+                              value and bisects downward to discover the
+                              latency-plateau edge (c_opt) and the smallest CPU
+                              meeting the SLO (c_min); the operator does not
+                              supply a lower bound — the algorithm's resolution
+                              floor + a hardcoded safety floor handle that.
+                              Standard Kubernetes CPU quantity (e.g. "2",
+                              "2000m", "1.5").
+                            type: string
+                            pattern: "^(\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))))?$"
                 durationPolicy:
                   description: |
                     Signals the controller uses to declare each measurement
@@ -362,6 +359,22 @@ spec:
                           Finalized CPU limit for the running phase on this
                           node, computed under the run's gate metric.
                         type: string
+                      cMinStarting:
+                        description: |
+                          c_min for the cold phase — the smallest probed
+                          CPU on this node where the gate metric meets
+                          spec.acceptableResponseTime.cold. Omitted (empty)
+                          when no probed sample met the SLO or when
+                          acceptableResponseTime.cold was not supplied.
+                          Consumed by the online stage's waterfall.
+                        type: string
+                        pattern: "^(\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))))?$"
+                      cMinRunning:
+                        description: |
+                          c_min for the warm phase. Same derivation rule as
+                          cMinStarting but against acceptableResponseTime.warm.
+                        type: string
+                        pattern: "^(\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))))?$"
                       runningRt:
                         description: |
                           Saturated RT stats — the (avg, p90, p95) measured

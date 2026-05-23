@@ -174,6 +174,12 @@ func WriteMeta(runRoot string, ev *nimbusevent.NimbusEvent, candidateNodes []str
 
 // nodeResultFile is the shape of <runRoot>/<node>/result.json.
 //
+// StartingCpu / RunningCpu are c_opt (the latency-plateau edges) for the
+// cold and warm phases. CMinStarting / CMinRunning are c_min — the
+// smallest probed CPU meeting spec.acceptableResponseTime.<phase>.
+// Empty string for either c_min means "no probed sample met the SLO
+// budget" (or the SLO budget was absent for that phase).
+//
 // ColdRtSamples / WarmRtSamples carry the full per-probe search trail —
 // one SamplePoint per CPU the binary search visited, sorted ascending by
 // CPU. Persisting them here (in addition to .status.perNode) makes
@@ -186,18 +192,20 @@ type nodeResultFile struct {
 	Node                 string                    `json:"node"`
 	StartingCpu          string                    `json:"startingCpu,omitempty"`
 	StartingRt           *nimbusevent.RtStats      `json:"startingRt,omitempty"`
+	CMinStarting         string                    `json:"cMinStarting,omitempty"`
 	ColdRtSamples        []nimbusevent.SamplePoint `json:"coldRtSamples,omitempty"`
 	RunningCpu           string                    `json:"runningCpu,omitempty"`
 	RunningRt            *nimbusevent.RtStats      `json:"runningRt,omitempty"`
+	CMinRunning          string                    `json:"cMinRunning,omitempty"`
 	WarmRtSamples        []nimbusevent.SamplePoint `json:"warmRtSamples,omitempty"`
 	ColdPhaseCompletedAt string                    `json:"cold_phase_completed_at,omitempty"`
 	WarmPhaseCompletedAt string                    `json:"warm_phase_completed_at,omitempty"`
 }
 
 // WriteResult writes <runRoot>/<node>/result.json with the converged CPU
-// values + saturated RT stats + the full per-probe sample trail for
-// this node. Overwrites any existing file. completedAt is the timestamp
-// at which the per-node search finished.
+// values (c_opt + c_min) + saturated RT stats + the full per-probe
+// sample trail for this node. Overwrites any existing file. completedAt
+// is the timestamp at which the per-node search finished.
 func WriteResult(runRoot, node string, r *nimbusevent.NodeResult, completedAt time.Time) error {
 	if runRoot == "" || r == nil {
 		return nil
@@ -211,9 +219,11 @@ func WriteResult(runRoot, node string, r *nimbusevent.NodeResult, completedAt ti
 		Node:          node,
 		StartingCpu:   r.StartingCpu,
 		StartingRt:    r.StartingRt,
+		CMinStarting:  r.CMinStarting,
 		ColdRtSamples: r.ColdRtSamples,
 		RunningCpu:    r.RunningCpu,
 		RunningRt:     r.RunningRt,
+		CMinRunning:   r.CMinRunning,
 		WarmRtSamples: r.WarmRtSamples,
 	}
 	// Use the same completedAt for both phases — we write at end-of-node, not

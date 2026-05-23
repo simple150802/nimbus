@@ -109,6 +109,46 @@ func computeProbeStats(samples []time.Duration) ProbeStats {
 	}
 }
 
+// deriveMin returns c_min for a phase: the smallest CPU in `samples` at
+// which the gate metric (selected by `metric`) is at or below
+// `sloRtMillis`. Returns "" when no sample meets the budget — that's the
+// correct signal for "this node can't satisfy the SLO at any probed
+// CPU." Caller logs a warning and writes "" into status.perNode.*.
+//
+// `samples` is assumed sorted ascending by CPU (the binary-search
+// wrappers call sortSamplesByCpu at end-of-phase). If a caller passes
+// an unsorted slice, this function is still correct — it just walks
+// every entry and returns the first match — but performance is O(N)
+// rather than the same O(N) it would be on a sorted list (no asymptotic
+// difference; the comment is here to flag the design intent for future
+// optimisations that might rely on sortedness, e.g. early exit).
+//
+// `sloRtMillis = 0` is a sentinel meaning "no budget for this phase"
+// (spec.acceptableResponseTime.<phase> absent). Returns "" immediately
+// without walking the list — c_min derivation is skipped for this phase.
+func deriveMin(samples []nimbusevent.SamplePoint, metric string, sloRtMillis int64) string {
+	if sloRtMillis <= 0 || len(samples) == 0 {
+		return ""
+	}
+	pick := func(s nimbusevent.SamplePoint) int64 {
+		switch metric {
+		case MetricAvg:
+			return s.RtMillis
+		case MetricP90:
+			return s.RtP90Millis
+		case MetricP95, "":
+			return s.RtP95Millis
+		}
+		return s.RtP95Millis
+	}
+	for _, s := range samples {
+		if pick(s) <= sloRtMillis {
+			return s.Cpu
+		}
+	}
+	return ""
+}
+
 // Re-export the kubeconfig globals so the rest of the package can use the
 // short names without prefixing every call.
 var (
@@ -138,6 +178,14 @@ const (
 
 	phaseCold = "COLD"
 	phaseWarm = "WARM"
+
+	// minProbeCpuMilli is the safety floor for binary-search probes.
+	// runBinarySearch refuses to probe at a CPU below this value — some
+	// workloads crash-loop at very small allocations and stuck-recovery
+	// would burn the maxStuckRetries budget for no gain. When the next
+	// bisect midpoint would fall below this floor, runBinarySearch exits
+	// the loop and returns the current `high` as c_opt.
+	minProbeCpuMilli = 50
 )
 
 // sleepCtx waits for d or ctx cancellation, whichever comes first. Returns
