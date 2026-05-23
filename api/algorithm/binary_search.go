@@ -297,6 +297,44 @@ func rtStatsFromSample(s *nimbusevent.SamplePoint) *nimbusevent.RtStats {
 	}
 }
 
+// gateRtFromStats returns the active-gate millisecond field from the
+// converged RtStats — mirrors metricGate's selection rules but reads
+// the persisted int64 fields instead of ProbeStats durations. Unknown
+// metric falls back to p95 (same default as metricGate).
+func gateRtFromStats(rt *nimbusevent.RtStats, metric string) int64 {
+	if rt == nil {
+		return 0
+	}
+	switch resolvedMetric(metric) {
+	case MetricAvg:
+		return rt.AvgMillis
+	case MetricP90:
+		return rt.P90Millis
+	default:
+		return rt.P95Millis
+	}
+}
+
+// formatPhaseSummary builds the one-line end-of-phase log digest.
+// gateLabel is the canonical metric name from resolvedMetric; gateRtMs
+// is the matching field from the converged RtStats. The c_min portion
+// reads "unset (no slo)" when no SLO was configured for this phase,
+// "infeasible (slo=Xms)" when an SLO was set but no probed CPU met it,
+// and "<cpu> (slo=Xms)" otherwise.
+func formatPhaseSummary(phaseTag, node, cOpt, gateLabel string, gateRtMs int64, cMin string, sloMs int64, sampleCount int) string {
+	var cMinPart string
+	switch {
+	case sloMs == 0:
+		cMinPart = "c_min=unset (no slo)"
+	case cMin == "":
+		cMinPart = fmt.Sprintf("c_min=infeasible (slo=%dms)", sloMs)
+	default:
+		cMinPart = fmt.Sprintf("c_min=%s (slo=%dms)", cMin, sloMs)
+	}
+	return fmt.Sprintf("[%s] phase complete on node=%s: c_opt=%s (%s=%dms) | %s | samples=%d",
+		phaseTag, node, cOpt, gateLabel, gateRtMs, cMinPart, sampleCount)
+}
+
 func binarySearchForStartingPhase(ctx context.Context, current *nimbusevent.NimbusEvent, node string) (string, error) {
 	cpuBudget := current.Spec.ResourcePolicy.ContainerPolicies[0].CpuBudget
 
@@ -344,6 +382,13 @@ func binarySearchForStartingPhase(ctx context.Context, current *nimbusevent.Nimb
 		))
 	}
 
+	logging.Info(formatPhaseSummary(
+		phaseCold, node, cOpt,
+		resolvedMetric(current.Spec.Metric),
+		gateRtFromStats(nr.StartingRt, current.Spec.Metric),
+		nr.CMinStarting, sloCold, len(nr.ColdRtSamples),
+	))
+
 	return cOpt, nil
 }
 
@@ -390,6 +435,13 @@ func binarySearchForRunningPhase(ctx context.Context, current *nimbusevent.Nimbu
 			node, sloWarm,
 		))
 	}
+
+	logging.Info(formatPhaseSummary(
+		phaseWarm, node, cOpt,
+		resolvedMetric(current.Spec.Metric),
+		gateRtFromStats(nr.RunningRt, current.Spec.Metric),
+		nr.CMinRunning, sloWarm, len(nr.WarmRtSamples),
+	))
 
 	return cOpt, nil
 }
