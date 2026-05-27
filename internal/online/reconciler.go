@@ -76,8 +76,11 @@ func ReconcileOne(ctx context.Context, ev *nimbusevent.NimbusEvent, claimed map[
 		})
 	}
 
-	startingCpu := profile.StartingCpu
-	runningCpu := profile.RunningCpu
+	// Phase 1 applies the c_opt tier. c_min is extracted into the profile too
+	// (Phase 2) and surfaced in the decide log so it's observable before the
+	// Phase 3 waterfall consumes it; it does not influence the choice yet.
+	startingCpu := profile.OptStarting
+	runningCpu := profile.OptRunning
 	warmPath := ev.Spec.DurationPolicy.WarmApiCondition.Path
 	ksvcs := ev.Selector.MatchExpressions[0].Values
 
@@ -121,8 +124,8 @@ func ReconcileOne(ctx context.Context, ev *nimbusevent.NimbusEvent, claimed map[
 		}
 		if bchanged || pchanged {
 			anyWrite = true
-			logging.Info(fmt.Sprintf("[online][ksvc] event=ksvc_decide ns=%s nimbus=%s ksvc=%s node=%s tier=%s starting=%s running=%s action=patch",
-				ns, nimbus, ksvc, node, nimbusevent.TierCOpt, startingCpu, runningCpu))
+			logging.Info(fmt.Sprintf("[online][ksvc] event=ksvc_decide ns=%s nimbus=%s ksvc=%s node=%s tier=%s starting=%s running=%s cmin_starting=%s cmin_running=%s action=patch",
+				ns, nimbus, ksvc, node, nimbusevent.TierCOpt, startingCpu, runningCpu, profile.MinStarting, profile.MinRunning))
 		}
 
 		assignments = append(assignments, nimbusevent.OnlineAssignment{
