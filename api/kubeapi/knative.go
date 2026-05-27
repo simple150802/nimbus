@@ -9,9 +9,65 @@ import (
 	"nimbus/api/logging"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 )
+
+// readKsvcApplyState reads the fields the apply helpers mutate, so those
+// helpers can skip a no-op write when the ksvc already matches desired
+// state (level-triggered reconcile: a converged tick issues no PATCH and
+// logs nothing). cpuLimit/cpuRequest are container[0]'s values ("" if
+// unset); selector is spec.template.spec.nodeSelector. found is false when
+// the ksvc can't be read — callers then fall through to write (create-through).
+func readKsvcApplyState(ctx context.Context, namespace, ksvcName string) (cpuLimit, cpuRequest string, selector map[string]string, found bool) {
+	obj, err := DYNCLIENT.Resource(KSVC_GVR).Namespace(namespace).Get(ctx, ksvcName, metav1.GetOptions{})
+	if err != nil {
+		return "", "", nil, false
+	}
+	selector, _, _ = unstructured.NestedStringMap(obj.Object, "spec", "template", "spec", "nodeSelector")
+	containers, _, _ := unstructured.NestedSlice(obj.Object, "spec", "template", "spec", "containers")
+	if len(containers) > 0 {
+		if c0, ok := containers[0].(map[string]interface{}); ok {
+			cpuLimit, _, _ = unstructured.NestedString(c0, "resources", "limits", "cpu")
+			cpuRequest, _, _ = unstructured.NestedString(c0, "resources", "requests", "cpu")
+		}
+	}
+	return cpuLimit, cpuRequest, selector, true
+}
+
+// cpuEqual compares two CPU quantity strings semantically, so "1000m" and
+// "1" count as equal. Falls back to string compare when either side can't
+// be parsed (e.g. an empty current value). Used to avoid a spurious patch
+// when the apiserver has normalized the stored quantity.
+func cpuEqual(a, b string) bool {
+	if a == b {
+		return true
+	}
+	qa, ea := resource.ParseQuantity(a)
+	qb, eb := resource.ParseQuantity(b)
+	if ea != nil || eb != nil {
+		return false
+	}
+	return qa.Cmp(qb) == 0
+}
+
+// selectorEqual reports whether two nodeSelector maps are exactly equal
+// (same keys, same values). A desired-vs-current mismatch — including a
+// leftover kubernetes.io/hostname pin on the current side — returns false
+// so the caller re-asserts the pool selector.
+func selectorEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
+}
 
 // MonitorKsvcResources polls the ksvc's pods every 2 seconds and reports the
 // user-container's CPU limit. The phase tag ("COLD" / "WARM") appears in
@@ -73,7 +129,17 @@ func MonitorKsvcResources(ctx context.Context, phase, namespace, ksvcName string
 // instead of `replace` so the patch works whether or not the manifest
 // already had a requests.cpu field. Logs the set event so the user can
 // trace when the value actually hits the ksvc.
-func PatchResourceLimits(ctx context.Context, namespace, ksvcName, cpuLimit string) error {
+// Returns changed=true only when it actually issued a PATCH; a converged
+// no-op returns (false, nil) so callers (the online reconciler) can stay
+// silent when nothing moved.
+func PatchResourceLimits(ctx context.Context, namespace, ksvcName, cpuLimit string) (changed bool, err error) {
+	// No-op when the ksvc already carries this CPU on both requests and
+	// limits — a converged reconcile tick issues no write and logs nothing.
+	if curLimit, curReq, _, found := readKsvcApplyState(ctx, namespace, ksvcName); found &&
+		cpuEqual(curLimit, cpuLimit) && cpuEqual(curReq, cpuLimit) {
+		return false, nil
+	}
+
 	logging.Info(fmt.Sprintf("[set] ksvc cpu (request=limit) -> ns=%s ksvc=%s cpu=%s", namespace, ksvcName, cpuLimit))
 
 	patchPayload := []map[string]interface{}{
@@ -91,7 +157,7 @@ func PatchResourceLimits(ctx context.Context, namespace, ksvcName, cpuLimit stri
 
 	payloadBytes, err := json.Marshal(patchPayload)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	_, err = DYNCLIENT.Resource(KSVC_GVR).Namespace(namespace).Patch(
@@ -101,7 +167,7 @@ func PatchResourceLimits(ctx context.Context, namespace, ksvcName, cpuLimit stri
 		payloadBytes,
 		metav1.PatchOptions{},
 	)
-	return err
+	return true, err
 }
 
 // PatchMaxScale stamps autoscaling.knative.dev/max-scale=1 on the ksvc so
@@ -180,6 +246,13 @@ func UnsetMaxScale(ctx context.Context, namespace, ksvcName string) error {
 // used throughout so the call succeeds whether or not the target paths
 // already exist on the ksvc.
 func ApplyKsvcSpec(ctx context.Context, namespace, ksvcName string, selector map[string]string, runningCpu string) error {
+	// No-op when nodeSelector and CPU (requests==limits) already match
+	// desired — a converged reconcile tick issues no write and logs nothing.
+	if curLimit, curReq, curSel, found := readKsvcApplyState(ctx, namespace, ksvcName); found &&
+		cpuEqual(curLimit, runningCpu) && cpuEqual(curReq, runningCpu) && selectorEqual(curSel, selector) {
+		return nil
+	}
+
 	logging.Info(fmt.Sprintf("[set] ksvc spec -> ns=%s ksvc=%s selector=%v cpu=%s",
 		namespace, ksvcName, selector, runningCpu))
 
@@ -230,6 +303,12 @@ func ApplyKsvcSpec(ctx context.Context, namespace, ksvcName string, selector map
 // function is kept for callers that need to set just the selector
 // (e.g. the late-arriving ksvc path in StartKsvcWatcher).
 func PatchKsvcNodeSelector(ctx context.Context, namespace, ksvcName string, selector map[string]string) error {
+	// No-op when the ksvc's nodeSelector already equals the desired pool
+	// selector — a converged reconcile tick issues no write and logs nothing.
+	if _, _, curSel, found := readKsvcApplyState(ctx, namespace, ksvcName); found && selectorEqual(curSel, selector) {
+		return nil
+	}
+
 	logging.Info(fmt.Sprintf("[set] ksvc nodeSelector -> ns=%s ksvc=%s selector=%v", namespace, ksvcName, selector))
 
 	value := map[string]interface{}{}

@@ -51,7 +51,7 @@ func getResptWarm(ctx context.Context, event *nimbusevent.NimbusEvent, cpuValue 
 
 	targetKsvc := event.Selector.MatchExpressions[0].Values[0]
 	boostName := event.Metadata.Name + "-" + targetKsvc
-	if err := kubeapi.PatchResourceLimits(ctx, event.Metadata.Namespace, targetKsvc, cpuValue); err != nil {
+	if _, err := kubeapi.PatchResourceLimits(ctx, event.Metadata.Namespace, targetKsvc, cpuValue); err != nil {
 		logging.Failure("[WARM] failed to patch ksvc CPU limit:", err)
 		return ProbeStats{}, err
 	}

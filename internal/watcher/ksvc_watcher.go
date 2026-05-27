@@ -82,16 +82,20 @@ func (nw *NimbusWatcher) maybePatchNewKsvc(ctx context.Context, ksvc *unstructur
 			// arriving ksvc would carry whatever the user wrote in its
 			// own manifest, violating the "Nimbus is the source of truth
 			// for nodeSelector" invariant declared in offline.md §3.0.
+			// Both helpers no-op when the ksvc already matches; we only log
+			// "Propagating" when something actually changed.
 			if len(nimbus.Spec.Placement.NodeSelector) > 0 {
 				if err := kubeapi.PatchKsvcNodeSelector(ctx, ns, name, nimbus.Spec.Placement.NodeSelector); err != nil {
 					logging.Failure("ksvc watcher: nodeSelector patch failed:", err)
 					return
 				}
 			}
-			logging.Info("Propagating RunningCPU to new ksvc:",
-				ns+"/"+name, "->", runningMax)
-			if err := kubeapi.PatchResourceLimits(ctx, ns, name, runningMax); err != nil {
+			cpuChanged, err := kubeapi.PatchResourceLimits(ctx, ns, name, runningMax)
+			if err != nil {
 				logging.Failure("ksvc watcher: patch failed:", err)
+			} else if cpuChanged {
+				logging.Info("Propagating RunningCPU to new ksvc:",
+					ns+"/"+name, "->", runningMax)
 			}
 			return
 		}

@@ -146,7 +146,7 @@ execute NIMBUS's intent; record each decision in
 `.status.online.assignments` for downstream experiment scripts.
 
 **Out of scope.** Anticipatory deferral / pending-cold-start registry
-(Problem 3 in [discuss.md](../discuss.md) — deferred, see decision #16);
+(Problem 3 — deferred, see decision #16);
 in-place pod `/resize` for tier upgrades (deferred until Kubernetes 1.27+
 feature gate is universally available); production single-URL routing;
 ksvc creation / deletion automation.

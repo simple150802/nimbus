@@ -60,7 +60,7 @@ func BinarySearch(ctx context.Context, current *nimbusevent.NimbusEvent, node st
 	// every probe in the active search satisfies the webhook's
 	// "target >= current" gate. Cannot just remove limits — the boost
 	// project requires an existing limit to snapshot for revert.
-	if err := kubeapi.PatchResourceLimits(ctx, ns, ksvc, floorResetCpu); err != nil {
+	if _, err := kubeapi.PatchResourceLimits(ctx, ns, ksvc, floorResetCpu); err != nil {
 		return "", fmt.Errorf("failed to reset ksvc cpu before binary search: %w", err)
 	}
 

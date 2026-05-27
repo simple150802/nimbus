@@ -141,3 +141,49 @@ func matches(a, b *nimbusevent.NimbusEvent) bool {
 	return a.Metadata.Namespace == b.Metadata.Namespace &&
 		a.Metadata.Name == b.Metadata.Name
 }
+
+// ListCompleted returns defensive-copy snapshots of every completed Nimbus,
+// for the online reconciler to read without touching the worker queue or
+// racing the worker's in-place field replacements. Each snapshot copies the
+// fields the online stage consumes — Metadata, Selector, Spec, Status and
+// PerNodeResults. The worker only ever replaces these wholesale (never edits
+// a shared slice/map in place), so the copies never observe a torn write.
+//
+// Read-only contract: the online stage must treat the returned events as
+// immutable. It is the sole intended caller (Phase 1+).
+func (nw *NimbusWatcher) ListCompleted() []*nimbusevent.NimbusEvent {
+	nw.mu.RLock()
+	defer nw.mu.RUnlock()
+
+	out := make([]*nimbusevent.NimbusEvent, 0, len(nw.completed))
+	for _, ev := range nw.completed {
+		if ev == nil {
+			continue
+		}
+		snap := &nimbusevent.NimbusEvent{
+			Metadata: ev.Metadata,
+			Spec:     ev.Spec,
+			Status:   ev.Status,
+		}
+		if len(ev.Selector.MatchExpressions) > 0 {
+			snap.Selector.MatchExpressions = make([]nimbusevent.MatchExpression, len(ev.Selector.MatchExpressions))
+			for i, me := range ev.Selector.MatchExpressions {
+				cp := me
+				cp.Values = append([]string(nil), me.Values...)
+				snap.Selector.MatchExpressions[i] = cp
+			}
+		}
+		if len(ev.PerNodeResults) > 0 {
+			snap.PerNodeResults = make(map[string]*nimbusevent.NodeResult, len(ev.PerNodeResults))
+			for node, r := range ev.PerNodeResults {
+				if r == nil {
+					continue
+				}
+				rc := *r
+				snap.PerNodeResults[node] = &rc
+			}
+		}
+		out = append(out, snap)
+	}
+	return out
+}

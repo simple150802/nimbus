@@ -132,3 +132,36 @@ func WriteAppliedStatus(ctx context.Context, namespace, name string, applied map
 		namespace, name, len(applied)))
 	return nil
 }
+
+// WriteNimbusOnlineStatus persists the online reconciler's assignment rows to
+// .status.online. It writes ONLY the online subtree via a merge-patch on the
+// status subresource — it never touches .status.perNode (owned by the offline
+// stage). A nil online clears the subtree.
+//
+// Used exclusively by internal/online. The offline path must not call this.
+func WriteNimbusOnlineStatus(ctx context.Context, namespace, name string, online *nimbusevent.OnlineStatus) error {
+	var onlineValue interface{}
+	if online != nil {
+		onlineValue = online
+	}
+
+	payload := map[string]interface{}{
+		"status": map[string]interface{}{
+			"online": onlineValue,
+		},
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	_, err = DYNCLIENT.Resource(NIMBUS_GVR).Namespace(namespace).Patch(
+		ctx,
+		name,
+		types.MergePatchType,
+		payloadBytes,
+		metav1.PatchOptions{},
+		"status",
+	)
+	return err
+}

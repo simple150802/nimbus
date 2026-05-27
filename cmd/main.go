@@ -6,6 +6,7 @@ import (
 	"syscall"
 
 	"nimbus/api/logging"
+	"nimbus/internal/online"
 	"nimbus/internal/watcher"
 )
 
@@ -17,9 +18,10 @@ func main() {
 
 	nw := watcher.NewNimbusWatcher()
 
-	go nw.StartWatcher(ctx)     // Nimbus CRD producer
-	go nw.StartKsvcWatcher(ctx) // ksvc Added propagation
-	nw.RunWorker(ctx)           // consumer — blocks until ctx is cancelled
+	go nw.StartWatcher(ctx)            // Nimbus CRD producer
+	go nw.StartKsvcWatcher(ctx)        // ksvc Added propagation
+	go online.StartController(ctx, nw) // online reconciler (polling; reads completed snapshots)
+	nw.RunWorker(ctx)                  // consumer — blocks until ctx is cancelled
 
 	logging.Stage("Shutdown complete.")
 }
