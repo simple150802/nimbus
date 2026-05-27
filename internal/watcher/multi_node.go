@@ -14,16 +14,12 @@ import (
 	"nimbus/internal/preMeasured"
 )
 
-// runMultiNodeSearch loops the binary search over each candidate node.
-// Each iteration pins the ksvc to the node so all probed pods land there;
-// each new pin overwrites the previous, so a single deferred unpin at the
-// end is enough to restore the user's scheduling. Inner skip: a node whose
-// PerNodeResults entry is already fully saturated (both phases done from a
-// previous run, recovered from .status) is skipped — same idea as the old
-// flat-Saturated fast path, but at per-node granularity. On any per-node
-// error the loop aborts; partial PerNodeResults stay on the event so the
-// next reconcile can resume from the saturated nodes.
-func (nw *NimbusWatcher) runMultiNodeSearch(ctx context.Context, current *nimbusevent.NimbusEvent) error {
+// runNodePoolSearch runs the binary search for the selected representative
+// node from the Nimbus node pool. CandidateNodes intentionally contains only
+// that representative. The measured ksvc is first reset to the Nimbus pool
+// selector, then temporarily pinned by hostname so the probe is deterministic.
+// The hostname pin is removed at the end, leaving the pool selector in place.
+func (nw *NimbusWatcher) runNodePoolSearch(ctx context.Context, current *nimbusevent.NimbusEvent) error {
 	ns := current.Metadata.Namespace
 	ksvc := current.Selector.MatchExpressions[0].Values[0]
 
@@ -48,27 +44,33 @@ func (nw *NimbusWatcher) runMultiNodeSearch(ctx context.Context, current *nimbus
 		}
 	}()
 
-	for _, node := range current.CandidateNodes {
-		if r := current.PerNodeResults[node]; r != nil && r.StartingSaturated && r.RunningSaturated {
-			logging.Info(fmt.Sprintf("[nodes] node=%s already saturated (starting=%s running=%s) — skipping",
-				node, r.StartingCpu, r.RunningCpu))
-			continue
-		}
+	if len(current.CandidateNodes) != 1 {
+		return fmt.Errorf("expected exactly one representative node, got %d", len(current.CandidateNodes))
+	}
+	representative := current.CandidateNodes[0]
 
-		if err := kubeapi.PinKsvcToNode(ctx, ns, ksvc, node); err != nil {
-			return fmt.Errorf("pin to %s: %w", node, err)
-		}
-		logging.Stage(fmt.Sprintf("[nodes] BinarySearch on node=%s", node))
-		if _, err := algorithm.BinarySearch(ctx, current, node); err != nil {
-			return fmt.Errorf("BinarySearch on %s: %w", node, err)
-		}
+	if r := current.PerNodeResults[representative]; r != nil && r.StartingSaturated && r.RunningSaturated {
+		logging.Info(fmt.Sprintf("[nodes] representative=%s already saturated (starting=%s running=%s) — skipping",
+			representative, r.StartingCpu, r.RunningCpu))
+		return nil
+	}
 
-		// Write per-node result.json now (not at end-of-loop) so partial
-		// progress survives a mid-loop crash. Non-fatal on failure.
-		if current.ExportRoot != "" {
-			if err := export.WriteResult(current.ExportRoot, node, current.PerNodeResults[node], time.Now()); err != nil {
-				logging.Warning(fmt.Sprintf("[export] WriteResult(%s) failed: %v", node, err))
-			}
+	if err := kubeapi.PatchKsvcNodeSelector(ctx, ns, ksvc, current.Spec.Placement.NodeSelector); err != nil {
+		return fmt.Errorf("set pool selector on %s: %w", ksvc, err)
+	}
+	if err := kubeapi.PinKsvcToNode(ctx, ns, ksvc, representative); err != nil {
+		return fmt.Errorf("pin representative %s: %w", representative, err)
+	}
+	logging.Stage(fmt.Sprintf("[nodes] BinarySearch on representative=%s", representative))
+	if _, err := algorithm.BinarySearch(ctx, current, representative); err != nil {
+		return fmt.Errorf("BinarySearch on %s: %w", representative, err)
+	}
+
+	// Write representative result.json now so progress survives a mid-run
+	// crash. Non-fatal on failure.
+	if current.ExportRoot != "" {
+		if err := export.WriteResult(current.ExportRoot, representative, current.PerNodeResults[representative], time.Now()); err != nil {
+			logging.Warning(fmt.Sprintf("[export] WriteResult(%s) failed: %v", representative, err))
 		}
 	}
 	return nil
@@ -106,9 +108,9 @@ func loadPerNodeFromStatus(current *nimbusevent.NimbusEvent) {
 }
 
 // applyPreMeasured overlays values from spec.preMeasured.loadFromDir onto
-// PerNodeResults for any candidate node that wasn't already saturated by
+// PerNodeResults for any representative node that wasn't already saturated by
 // loadPerNodeFromStatus. Status wins over preMeasured (preMeasured is a
-// seed, not an override). Returns true iff at least one candidate node
+// seed, not an override). Returns true iff at least one representative node
 // gained saturation from the load — the caller uses this to decide
 // whether to persist status when the fast path subsequently fires.
 //
@@ -158,7 +160,7 @@ func applyPreMeasured(current *nimbusevent.NimbusEvent) bool {
 		}
 		preLoaded, ok := loaded[node]
 		if !ok {
-			continue // no preMeasured data for this candidate node
+			continue // no preMeasured data for this representative node
 		}
 
 		// Overlay. When existing is non-nil, replace each phase's fields
@@ -206,7 +208,7 @@ func normalizeMetric(metric string) string {
 }
 
 // recomputeAllSaturated maintains the invariant that current.AllSaturated
-// is true iff every candidate node has both StartingSaturated and
+// is true iff every representative node has both StartingSaturated and
 // RunningSaturated. Called after loading from status and after the slow
 // path completes so the outer flag never lags the inner state.
 func recomputeAllSaturated(current *nimbusevent.NimbusEvent) {

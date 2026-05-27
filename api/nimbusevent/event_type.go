@@ -15,28 +15,26 @@ type NimbusEvent struct {
 
 	Next *NimbusEvent `json:"-"`
 
-	// CandidateNodes is the list of cluster nodes the target ksvc is
-	// eligible to run on, given its nodeSelector + nodeAffinity +
-	// tolerations. Populated once when the event enters the worker, sorted
-	// lexicographically. Empty until populated; nil after a discovery error.
+	// CandidateNodes is the offline measurement target set. In the
+	// node-pool-only POC it contains exactly one representative node selected
+	// from spec.placement.nodeSelector. Empty until populated; nil after a
+	// discovery error.
 	CandidateNodes []string `json:"-"`
 
-	// PerNodeResults is the per-node binary-search outcome map, keyed by
-	// node name. BinarySearch writes its converged CPU values directly
-	// into the entry for the node it's currently measuring, so downstream
-	// callers (status persistence, ksvc apply) read all results uniformly.
-	// Populated incrementally as the per-node loop iterates.
+	// PerNodeResults is the binary-search outcome map, keyed by measured node
+	// name. In the node-pool-only POC this normally has one representative
+	// entry, interpreted as the profile for the whole Nimbus node pool.
 	PerNodeResults map[string]*NodeResult `json:"-"`
 
-	// AllSaturated is the outer skip flag — true iff every candidate node
-	// has both StartingSaturated and RunningSaturated set. The worker
-	// sets it after loading state from .status; when true, the entire
-	// binary search is skipped (fast path).
+	// AllSaturated is the outer skip flag — true iff the representative
+	// profile has both StartingSaturated and RunningSaturated set. The worker
+	// sets it after loading state from .status; when true, the binary search
+	// is skipped (fast path).
 	AllSaturated bool `json:"-"`
 
 	// ExportRoot is the absolute filesystem path the controller writes
 	// raw per-sample CSVs + meta.json + per-node result.json to during
-	// this run's binary search. Set once by runMultiNodeSearch via
+	// this run's binary search. Set once by runNodePoolSearch via
 	// internal/export.InitRunDir; empty string means export is disabled
 	// (spec.export unset or directory uncreatable). Probe helpers read
 	// this field to decide whether to write per-probe CSVs.
@@ -138,6 +136,29 @@ type NimbusStatus struct {
 	// still running or has nothing to consume. One assignment row per ksvc
 	// listed in spec.selector.matchExpressions[0].values.
 	Online *OnlineStatus `json:"online,omitempty"`
+
+	// Applied records what the offline-phase apply loop attempted to write
+	// onto each ksvc in spec.selector.matchExpressions[0].values during the
+	// most recent reconcile tick. Keyed by ksvc name. Rewritten wholesale
+	// on every successful tick — a non-empty ApplyError on an entry means
+	// the apiserver rejected one of the patches and the ksvc may not match
+	// what NodeSelector / RunningCpu claim. Consumed by operators (and the
+	// future online reconciler) to verify the invariant that every ksvc's
+	// nodeSelector equals spec.placement.nodeSelector after offline.
+	Applied map[string]KsvcApplyState `json:"applied,omitempty"`
+}
+
+// KsvcApplyState is one row of NimbusStatus.Applied — the offline-phase
+// apply loop's per-ksvc outcome for one reconcile tick. NodeSelector is
+// what NIMBUS wrote (not what the ksvc currently has — those can drift
+// if a third party patches the ksvc after the tick); ApplyError is the
+// Go error.Error() of the first failure inside the apply loop, with
+// later patches in the same tick skipped to avoid a partial mutation.
+type KsvcApplyState struct {
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+	StartingCpu  string            `json:"startingCpu,omitempty"`
+	RunningCpu   string            `json:"runningCpu,omitempty"`
+	ApplyError   string            `json:"applyError,omitempty"`
 }
 
 // Tier identifies which performance band a ksvc was assigned to. Mirrors
@@ -253,11 +274,23 @@ type NimbusSpec struct {
 	// waterfall degenerates to c_opt -> c_floor.
 	AcceptableResponseTime *AcceptableResponseTimeSpec `json:"acceptableResponseTime,omitempty"`
 
+	// Placement declares the Nimbus-owned node pool. Offline profiling resolves
+	// this selector to Ready nodes and measures one representative node; online
+	// applies the same selector to every controlled ksvc.
+	Placement PlacementSpec `json:"placement,omitempty"`
+
 	ResourcePolicy ResourcePolicy    `json:"resourcePolicy"`
 	DurationPolicy DurationPolicy    `json:"durationPolicy"`
 	Measurement    MeasurementPolicy `json:"measurement,omitempty"`
 	Export         *ExportSpec       `json:"export,omitempty"`
 	PreMeasured    *PreMeasuredSpec  `json:"preMeasured,omitempty"`
+}
+
+// PlacementSpec is the Nimbus-owned scheduling scope. For the thesis POC,
+// nodeSelector is the only supported placement input: every controlled ksvc
+// belongs to this pool, and offline uses it to choose one representative node.
+type PlacementSpec struct {
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 }
 
 // AcceptableResponseTimeSpec carries per-phase RT budgets in

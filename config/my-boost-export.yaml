@@ -20,6 +20,17 @@ selector:
     operator: In
     values: ["measure-yolo-001", "measure-yolo-002", "measure-yolo-003"]
 spec:
+  # Required. Declares the Nimbus-owned node pool. Offline picks one
+  # representative match (Ready+schedulable, sorted by name, take [0])
+  # and treats its profile as the pool's. At apply time the same
+  # selector is written verbatim onto every ksvc in selector.values[],
+  # replacing any user-set nodeSelector — one Nimbus, one pool.
+  # Pool nodes must be pre-labeled, e.g.:
+  #   kubectl label node worker-1 nimbus.io/pool=serverless
+  placement:
+    nodeSelector:
+      nimbus.io/pool: serverless
+
   # Optional: RT metric the binary search converges against. Default p95.
   # All three percentiles are recorded per probe regardless; this only
   # selects which one drives the 10% improvement gate.
@@ -44,7 +55,7 @@ spec:
   # (1 cold sample, 10 warm samples).
   measurement:
     coldSamples: 3
-    warmSamples: 3
+    warmSamples: 10
   resourcePolicy:
     containerPolicies:
     - containerName: user-container

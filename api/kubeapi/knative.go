@@ -163,6 +163,103 @@ func UnsetMaxScale(ctx context.Context, namespace, ksvcName string) error {
 	return err
 }
 
+// ApplyKsvcSpec bundles the offline-phase apply mutations onto one ksvc
+// into a single JSON-patch call: replace nodeSelector, then set
+// requests.cpu and limits.cpu (kept equal for Guaranteed QoS). One
+// apiserver round trip means the ksvc never lives in an intermediate
+// state where the new nodeSelector has landed but the CPU hasn't (or
+// vice versa) — a pod created mid-tick under the old composition is
+// impossible.
+//
+// The StartupCPUBoost CR is a different resource entirely and stays a
+// separate Create/Patch in the caller; cluster-level atomicity across
+// both objects isn't achievable without a transactional admission
+// pipeline.
+//
+// Both selector entries and runningCpu must be non-empty. `add` ops are
+// used throughout so the call succeeds whether or not the target paths
+// already exist on the ksvc.
+func ApplyKsvcSpec(ctx context.Context, namespace, ksvcName string, selector map[string]string, runningCpu string) error {
+	logging.Info(fmt.Sprintf("[set] ksvc spec -> ns=%s ksvc=%s selector=%v cpu=%s",
+		namespace, ksvcName, selector, runningCpu))
+
+	selectorValue := map[string]interface{}{}
+	for k, v := range selector {
+		selectorValue[k] = v
+	}
+
+	patchPayload := []map[string]interface{}{
+		{
+			"op":    "add",
+			"path":  "/spec/template/spec/nodeSelector",
+			"value": selectorValue,
+		},
+		{
+			"op":    "add",
+			"path":  "/spec/template/spec/containers/0/resources/limits/cpu",
+			"value": runningCpu,
+		},
+		{
+			"op":    "add",
+			"path":  "/spec/template/spec/containers/0/resources/requests/cpu",
+			"value": runningCpu,
+		},
+	}
+
+	payloadBytes, err := json.Marshal(patchPayload)
+	if err != nil {
+		return err
+	}
+
+	_, err = DYNCLIENT.Resource(KSVC_GVR).Namespace(namespace).Patch(
+		ctx,
+		ksvcName,
+		types.JSONPatchType,
+		payloadBytes,
+		metav1.PatchOptions{},
+	)
+	return err
+}
+
+// PatchKsvcNodeSelector replaces the ksvc template's nodeSelector with the
+// Nimbus-owned pool selector. This intentionally discards any previous manual
+// selector on controlled ksvcs so one Nimbus means one placement pool.
+//
+// Prefer ApplyKsvcSpec when the caller is also patching CPU in the same
+// tick — it bundles both mutations into one apiserver call. This
+// function is kept for callers that need to set just the selector
+// (e.g. the late-arriving ksvc path in StartKsvcWatcher).
+func PatchKsvcNodeSelector(ctx context.Context, namespace, ksvcName string, selector map[string]string) error {
+	logging.Info(fmt.Sprintf("[set] ksvc nodeSelector -> ns=%s ksvc=%s selector=%v", namespace, ksvcName, selector))
+
+	value := map[string]interface{}{}
+	for k, v := range selector {
+		value[k] = v
+	}
+
+	patchPayload := []map[string]interface{}{
+		{
+			"op":    "add",
+			"path":  "/spec/template/spec/nodeSelector",
+			"value": value,
+		},
+	}
+
+	payloadBytes, err := json.Marshal(patchPayload)
+	if err != nil {
+		return err
+	}
+
+	_, err = DYNCLIENT.Resource(KSVC_GVR).Namespace(namespace).Patch(
+		ctx,
+		ksvcName,
+		types.JSONPatchType,
+		payloadBytes,
+		metav1.PatchOptions{},
+	)
+	return err
+}
+
 // PinKsvcToNode constrains the ksvc to one node by adding a
 // kubernetes.io/hostname key to spec.template.spec.nodeSelector via a
 // JSON merge-patch. It composes (AND) with whatever nodeSelector or

@@ -50,6 +50,56 @@ func (nw *NimbusWatcher) Enqueue(newEvent *nimbusevent.NimbusEvent) {
 	nw.tail = newEvent
 }
 
+// Upsert is the watch.Modified path. It guarantees that a subsequent
+// reconcile tick will see the latest Spec/Selector/Status and re-run
+// the offline apply loop, so an operator edit (e.g. adding a name to
+// selector.values[] or rotating placement.nodeSelector) actually
+// converges instead of being silently deduped by Enqueue.
+//
+// Behaviour:
+//   - Removes the entry from `completed` so the worker re-applies on the
+//     next tick.
+//   - If the Nimbus is already in the queue, replaces its Spec / Selector
+//     / Status fields in place (preserving the linked-list pointers) and
+//     clears runtime caches so the next tick re-discovers candidate
+//     nodes and re-loads PerNodeResults from .status.
+//   - If it is neither queued nor completed, appends to the tail.
+//
+// Race note: when the worker is mid-tick on this Nimbus, in-place field
+// replacement creates a small window where the worker observes the new
+// Spec partway through processing. For the thesis POC the consequence
+// is at most one stale apply followed by re-reconciliation on the next
+// watch event — we accept it rather than copy the event into a per-tick
+// snapshot.
+func (nw *NimbusWatcher) Upsert(newEvent *nimbusevent.NimbusEvent) {
+	nw.mu.Lock()
+	defer nw.mu.Unlock()
+
+	key := newEvent.Metadata.Namespace + "/" + newEvent.Metadata.Name
+	delete(nw.completed, key)
+
+	for cur := nw.head; cur != nil; cur = cur.Next {
+		if matches(cur, newEvent) {
+			cur.Selector = newEvent.Selector
+			cur.Spec = newEvent.Spec
+			cur.Status = newEvent.Status
+			cur.PerNodeResults = nil
+			cur.CandidateNodes = nil
+			cur.AllSaturated = false
+			cur.ExportRoot = ""
+			return
+		}
+	}
+
+	if nw.head == nil {
+		nw.head = newEvent
+		nw.tail = newEvent
+		return
+	}
+	nw.tail.Next = newEvent
+	nw.tail = newEvent
+}
+
 // Dequeue does a linear search for the entry whose (namespace, name)
 // matches target, severs it from the linked list, and returns it.
 // Returns nil if no match. Despite the name, this is not a FIFO pop —

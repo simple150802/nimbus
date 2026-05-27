@@ -25,14 +25,24 @@ selector:
     operator: In
     values: ["measure-yolo-001", "measure-yolo-002", "measure-yolo-003"]
 spec:
+  # Required. Declares the Nimbus-owned node pool. For preload this should
+  # match the placement.nodeSelector used in the export run — otherwise the
+  # loaded per-node profile is being applied to a different pool. Same
+  # apply-time semantics as my-boost-export.yaml: this selector is written
+  # verbatim onto every ksvc in selector.values[].
+  placement:
+    nodeSelector:
+      nimbus.io/pool: serverless
+
   # Optional: must match the metric used when the loaded run was exported,
   # otherwise the loader logs a [preMeasured] mismatch warning and the
   # loaded CPU values reflect the *original* run's metric, not this one.
   # metric: p95
 
-  # Optional: latency budgets, consumed exclusively by the online stage.
-  # The offline preload path ignores this field. cold is required when the
-  # object is present; warm is optional.
+  # Optional: latency budgets. For preload, keep these identical to
+  # the exported run because result.json imports cMinStarting/cMinRunning
+  # as SLO-derived snapshots. If you change the SLO or metric, re-measure
+  # instead of treating the imported c_min values as valid.
   # acceptableResponseTime:
   #   cold: 1500
   #   warm: 50

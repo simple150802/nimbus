@@ -39,8 +39,33 @@ spec:
             spec:
               description: Desired state — what to profile and when the startup phase ends.
               type: object
-              required: [resourcePolicy, durationPolicy]
+              required: [resourcePolicy, durationPolicy, placement]
               properties:
+                placement:
+                  description: |
+                    Nimbus-owned scheduling scope. nodeSelector is the only
+                    supported placement input for the thesis POC: every
+                    controlled ksvc is treated as a member of this pool, and
+                    offline resolves the selector against Ready+schedulable
+                    nodes, sorts by name, and measures the first match as
+                    the representative for the whole pool. At apply time the
+                    same selector is written verbatim onto every ksvc in
+                    spec.selector.matchExpressions[0].values, replacing any
+                    user-set keys — one Nimbus means one placement pool.
+                  type: object
+                  required: [nodeSelector]
+                  properties:
+                    nodeSelector:
+                      description: |
+                        Label key/value pairs that must all be present on a
+                        node for it to be part of the pool. At least one
+                        entry is required. Operators are expected to label
+                        every pool node with this key/value before applying
+                        the Nimbus (e.g. nimbus.io/pool=worker-pool-a).
+                      type: object
+                      minProperties: 1
+                      additionalProperties:
+                        type: string
                 metric:
                   description: |
                     RT metric the binary search gates on. The search
@@ -431,6 +456,50 @@ spec:
                             rtP95Millis:
                               type: integer
                               minimum: 0
+                applied:
+                  description: |
+                    Per-ksvc outcome of the most recent apply tick. Keyed by
+                    ksvc name (matching spec.selector.matchExpressions[0].values
+                    entries). Rewritten wholesale on every reconcile so a
+                    successful tick clears any previous error. The presence
+                    of an entry guarantees NIMBUS *attempted* to apply that
+                    ksvc; absence means the ksvc wasn't in values[] at the
+                    time of the tick. applyError on an entry indicates the
+                    apiserver rejected one of the patches — the ksvc's
+                    current spec may not match what nodeSelector/runningCpu
+                    declare here. Operators can join against this map to
+                    see whether the invariant "ksvc.spec.template.spec.nodeSelector
+                    == spec.placement.nodeSelector" actually holds.
+                  type: object
+                  additionalProperties:
+                    type: object
+                    properties:
+                      nodeSelector:
+                        description: |
+                          The selector NIMBUS attempted to write onto this
+                          ksvc. Equals spec.placement.nodeSelector at apply
+                          time; cached here for traceability when spec
+                          changes after the apply.
+                        type: object
+                        additionalProperties:
+                          type: string
+                      startingCpu:
+                        description: Cold-phase CPU written into the per-ksvc StartupCPUBoost CR.
+                        type: string
+                        pattern: "^(\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))))?$"
+                      runningCpu:
+                        description: Running-phase CPU patched onto the ksvc spec (requests == limits).
+                        type: string
+                        pattern: "^(\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))))?$"
+                      applyError:
+                        description: |
+                          Non-empty when at least one of the patches in this
+                          tick failed for this ksvc. The exact string is the
+                          Go error.Error() of the first failure; further
+                          patches in the same tick are skipped to avoid
+                          a partially-mutated ksvc. Cleared on the next
+                          successful reconcile.
+                        type: string
                 online:
                   description: |
                     Online-stage assignments — filled in by the online reconciler

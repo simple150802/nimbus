@@ -52,6 +52,11 @@ func (nw *NimbusWatcher) StartWatcher(ctx context.Context) {
 			switch event.Type {
 			case watch.Added:
 				nw.Enqueue(&payload)
+			case watch.Modified:
+				// Modified flips the Nimbus back to "needs reconcile":
+				// drops it from completed, replaces in-queue fields, or
+				// appends if absent. See NimbusWatcher.Upsert.
+				nw.Upsert(&payload)
 			case watch.Deleted:
 				nw.Dequeue(&payload)
 			}
@@ -116,8 +121,8 @@ func (nw *NimbusWatcher) RunWorker(ctx context.Context) {
 			continue
 		}
 
-		// Discovery feeds both the saturation check (does .status.perNode
-		// cover every candidate?) and the slow-path loop. Read-only.
+		// Discovery resolves the Nimbus node pool and selects one representative
+		// node. .status.perNode only needs to cover that representative profile.
 		if err := nw.discoverCandidateNodes(ctx, current); err != nil {
 			logging.Warning("[nodes] discovery failed — retrying on next tick:", err)
 			if !sleepOrDone(ctx, idleSleep) {
@@ -157,21 +162,20 @@ func (nw *NimbusWatcher) RunWorker(ctx context.Context) {
 			}
 		} else {
 			logging.Stage("STEP PROCESSING:", current.Metadata.Namespace, current.Metadata.Name)
-			if err := nw.runMultiNodeSearch(ctx, current); err != nil {
-				logging.Failure("Multi-node search aborted — leaving Nimbus in queue to retry:", err)
+			if err := nw.runNodePoolSearch(ctx, current); err != nil {
+				logging.Failure("Node-pool search aborted — leaving Nimbus in queue to retry:", err)
 				if !sleepOrDone(ctx, idleSleep) {
 					return
 				}
 				continue
 			}
 			// Outer flag follows inner state — recompute so AllSaturated
-			// reflects the loop's outcome (true iff every node finished).
+			// reflects the representative profile outcome.
 			recomputeAllSaturated(current)
 
-			// Persist all per-node results so the next Added event takes the
-			// fast path above. Persisted even on partial completion (some
-			// nodes saturated, search aborted on a later one) so progress
-			// isn't lost — the next reconcile resumes from the saturated set.
+			// Persist the representative profile so the next Added event takes the
+			// fast path above. Persisted even on partial completion so progress
+			// is not lost across reconciles.
 			if err := kubeapi.WriteNimbusStatus(ctx,
 				current.Metadata.Namespace, current.Metadata.Name,
 				current.PerNodeResults); err != nil {
@@ -179,21 +183,59 @@ func (nw *NimbusWatcher) RunWorker(ctx context.Context) {
 			}
 		}
 
-		// Collapse per-node results into a single ksvc-wide CPU limit for
-		// apply. Max is safe: the slowest node's value sets the floor so no
-		// node starves at startup.
+		// Collapse profile results into a single ksvc-wide CPU limit for apply.
+		// In the node-pool-only POC this is normally one representative entry.
 		startingMax := kubeapi.MaxStartingCpu(current.PerNodeResults)
 		runningMax := kubeapi.MaxRunningCpu(current.PerNodeResults)
 
-		// Apply paths are idempotent. Errors are logged inside each helper;
-		// surfacing them here would just duplicate log lines. One boost CR
-		// per ksvc — each named "<nimbus>-<ksvc>" with labels identifying
-		// the owning Nimbus, so the upstream kube-startup-cpu-boost
-		// controller runs an independent boost lifecycle per ksvc and the
-		// reset recipe can label-select for cleanup.
+		// applied collects one row per ksvc in values[]: the selector and
+		// CPU pair NIMBUS attempted to write, plus the first error (if any).
+		// Persisted to .status.applied below so an operator can verify the
+		// invariant "every controlled ksvc's nodeSelector == Nimbus
+		// spec.placement.nodeSelector" via `kubectl get nimbus -o yaml`.
+		// Sized for the full values[] slice — one row per ksvc, regardless
+		// of success.
+		applied := make(map[string]nimbusevent.KsvcApplyState,
+			len(current.Selector.MatchExpressions[0].Values))
+
+		// Apply paths are idempotent. nodeSelector + running CPU land
+		// atomically via ApplyKsvcSpec — one JSON-patch call per ksvc so
+		// a pod can't be created mid-tick with the new selector but the
+		// old CPU (or vice versa). The boost CR is a separate resource so
+		// it stays a separate Create/Patch; cluster-wide atomicity across
+		// both objects isn't achievable without an admission pipeline.
+		//
+		// One boost CR per ksvc — each named "<nimbus>-<ksvc>" with labels
+		// identifying the owning Nimbus, so the upstream
+		// kube-startup-cpu-boost controller runs an independent boost
+		// lifecycle per ksvc and the reset recipe can label-select for cleanup.
 		for _, ksvc := range current.Selector.MatchExpressions[0].Values {
+			state := nimbusevent.KsvcApplyState{
+				NodeSelector: current.Spec.Placement.NodeSelector,
+				StartingCpu:  startingMax,
+				RunningCpu:   runningMax,
+			}
+
+			if err := kubeapi.ApplyKsvcSpec(ctx, current.Metadata.Namespace, ksvc,
+				current.Spec.Placement.NodeSelector, runningMax); err != nil {
+				// Skip the boost CR write on apply failure so we don't
+				// leave the cluster with a boost CR pointing at a ksvc
+				// whose spec we couldn't update — easier to reason about
+				// "either both or neither" on the next reconcile.
+				logging.Failure(fmt.Sprintf("Failed to apply ksvc spec for %s/%s: %v",
+					current.Metadata.Namespace, ksvc, err))
+				state.ApplyError = err.Error()
+				applied[ksvc] = state
+				continue
+			}
+
 			kubeapi.CreateStartupCPUBoost(ctx, current, ksvc, startingMax)
-			kubeapi.PatchResourceLimits(ctx, current.Metadata.Namespace, ksvc, runningMax)
+			applied[ksvc] = state
+		}
+
+		if err := kubeapi.WriteAppliedStatus(ctx,
+			current.Metadata.Namespace, current.Metadata.Name, applied); err != nil {
+			logging.Failure("Failed to persist Nimbus apply status:", err)
 		}
 
 		// Register so the ksvc watcher can propagate RunningCPU to future
@@ -230,6 +272,10 @@ func validateNimbus(ev *nimbusevent.NimbusEvent) error {
 	}
 	if len(ev.Spec.ResourcePolicy.ContainerPolicies) == 0 {
 		return fmt.Errorf("%s/%s: spec.resourcePolicy.containerPolicies is empty",
+			ev.Metadata.Namespace, ev.Metadata.Name)
+	}
+	if len(ev.Spec.Placement.NodeSelector) == 0 {
+		return fmt.Errorf("%s/%s: spec.placement.nodeSelector is empty",
 			ev.Metadata.Namespace, ev.Metadata.Name)
 	}
 	if ev.Spec.DurationPolicy.WarmApiCondition.Path == "" {

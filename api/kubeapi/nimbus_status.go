@@ -80,3 +80,55 @@ func WriteNimbusStatus(ctx context.Context, namespace, name string, perNode map[
 		namespace, name, len(statusMap)))
 	return nil
 }
+
+// WriteAppliedStatus persists the per-ksvc apply outcome from one tick to
+// .status.applied. Keys are ksvc names; values reflect what NIMBUS wrote
+// (or attempted to write) onto the ksvc during the apply loop. The map
+// is sent as a whole because merge-patch semantics on this subkey would
+// otherwise leak stale entries from previous values[] sets.
+//
+// `nil` and empty maps both clear .status.applied. The caller is
+// responsible for not writing partial state — pass the full set of ksvcs
+// the apply loop iterated over.
+//
+// To force-clear:
+//
+//	kubectl patch nimbus <name> -n <ns> --subresource=status --type=merge \
+//	    -p '{"status":{"applied":null}}'
+func WriteAppliedStatus(ctx context.Context, namespace, name string, applied map[string]nimbusevent.KsvcApplyState) error {
+	// Use explicit `null` to clear so a tick with no entries still gets
+	// recorded as "nothing applied" rather than leaving stale data.
+	var appliedValue interface{}
+	if len(applied) == 0 {
+		appliedValue = nil
+	} else {
+		appliedValue = applied
+	}
+
+	payload := map[string]interface{}{
+		"status": map[string]interface{}{
+			"applied": appliedValue,
+		},
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	_, err = DYNCLIENT.Resource(NIMBUS_GVR).Namespace(namespace).Patch(
+		ctx,
+		name,
+		types.MergePatchType,
+		payloadBytes,
+		metav1.PatchOptions{},
+		"status",
+	)
+	if err != nil {
+		logging.Failure("Failed to write Nimbus apply status:", err)
+		return err
+	}
+
+	logging.Success(fmt.Sprintf("Nimbus apply status persisted: %s/%s applied=%d entries",
+		namespace, name, len(applied)))
+	return nil
+}

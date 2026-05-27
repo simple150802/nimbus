@@ -15,57 +15,36 @@ import (
 	"nimbus/api/nimbusevent"
 )
 
-// ErrNoMatchingNodes is returned when the target ksvc's nodeSelector +
-// nodeAffinity match zero schedulable nodes. Callers should treat this
-// as a soft failure (the dev probably mis-typed a label) and retry on
-// the next reconcile, not silently fall back to "all nodes".
-var ErrNoMatchingNodes = errors.New("ksvc selector/affinity matches no schedulable nodes")
+// ErrNoMatchingNodes is returned when the Nimbus node-pool selector matches
+// zero schedulable nodes. Callers should treat this as a soft failure (the
+// operator probably mis-typed a pool label) and retry on the next reconcile,
+// not silently fall back to "all nodes".
+var ErrNoMatchingNodes = errors.New("Nimbus node-pool selector matches no schedulable nodes")
 
-// discoverCandidateNodes fills ev.CandidateNodes with the names of cluster
-// nodes the target ksvc can be scheduled to. Read-only against the
-// cluster — no patches, no scheduling change. The list is sorted so a
-// later per-node loop is reproducible across reconciles.
+// discoverCandidateNodes resolves the Ready, schedulable cluster nodes in the
+// Nimbus-owned node pool, then stores only the deterministic representative in
+// ev.CandidateNodes. The full pool is logged for traceability; the offline
+// profiler measures one node and treats that result as the pool profile.
 func (nw *NimbusWatcher) discoverCandidateNodes(ctx context.Context, ev *nimbusevent.NimbusEvent) error {
 	nodes, err := nw.computeCandidateNodes(ctx, ev)
 	if err != nil {
 		ev.CandidateNodes = nil
 		return err
 	}
-	ev.CandidateNodes = nodes
-	logging.Info(fmt.Sprintf("[nodes] %s/%s candidates: %v",
-		ev.Metadata.Namespace, ev.Metadata.Name, nodes))
+	representative := nodes[0]
+	ev.CandidateNodes = []string{representative}
+	logging.Info(fmt.Sprintf("[nodes] %s/%s pool=%v representative=%s selector=%v",
+		ev.Metadata.Namespace, ev.Metadata.Name, nodes, representative, ev.Spec.Placement.NodeSelector))
 	return nil
 }
 
-// computeCandidateNodes is the pure logic — fetch ksvc, extract scheduling
-// hints, list nodes, filter. Separated from discoverCandidateNodes so it
-// can be exercised by tests without the side-effect of writing to ev.
-//
-// Filters applied, in order: Ready+!unschedulable, ksvc nodeSelector,
-// ksvc nodeAffinity (required-only), ksvc tolerations vs node taints
-// (NoSchedule + NoExecute only).
-//
-// Known limitations — see multiple_nodes.md §11.7 for the full table:
-//   - Ignores podAffinity/podAntiAffinity, topologySpreadConstraints,
-//     volume affinity, custom schedulerName, and resource fit.
-//   - PreferNoSchedule taints + preferredDuringScheduling… affinity are
-//     soft hints; we treat them as non-constraints. Matches kube-scheduler
-//     semantics for hard eligibility.
-//   - matchFields on nodeAffinity terms is unsupported (matchExpressions only).
-//   - Gt / Lt operators on label values are unsupported (rare in app code).
+// computeCandidateNodes resolves the Nimbus-owned node pool. The pool comes
+// only from spec.placement.nodeSelector; existing ksvc placement is ignored so
+// all ksvcs controlled by one Nimbus share one explicit scheduling scope.
 func (nw *NimbusWatcher) computeCandidateNodes(ctx context.Context, ev *nimbusevent.NimbusEvent) ([]string, error) {
-	ksvcName := ev.Selector.MatchExpressions[0].Values[0]
-
-	ksvcObj, err := DYNCLIENT.Resource(KSVC_GVR).
-		Namespace(ev.Metadata.Namespace).
-		Get(ctx, ksvcName, metav1.GetOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("get ksvc %s/%s: %w", ev.Metadata.Namespace, ksvcName, err)
-	}
-
-	nodeSelector, nodeAffinity, tolerations, err := readKsvcScheduling(ksvcObj)
-	if err != nil {
-		return nil, fmt.Errorf("read ksvc scheduling spec: %w", err)
+	nodeSelector := ev.Spec.Placement.NodeSelector
+	if len(nodeSelector) == 0 {
+		return nil, fmt.Errorf("spec.placement.nodeSelector is empty")
 	}
 
 	nodes, err := CLIENTSET.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
@@ -80,12 +59,6 @@ func (nw *NimbusWatcher) computeCandidateNodes(ctx context.Context, ev *nimbusev
 			continue
 		}
 		if !nodeSelectorMatches(n, nodeSelector) {
-			continue
-		}
-		if !nodeAffinityMatches(n, nodeAffinity) {
-			continue
-		}
-		if !tolerationsMatch(n, tolerations) {
 			continue
 		}
 		matched = append(matched, n.Name)
