@@ -2,3 +2,6 @@
 # is set (see internal/export/export.go). Each run gets a timestamped
 # subdirectory; never commit them.
 results/
+
+# All controller log files, in any directory.
+*.log
