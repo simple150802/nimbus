@@ -18,7 +18,9 @@ package online
 import (
 	"context"
 	"fmt"
+	"os"
 	"sort"
+	"strconv"
 	"time"
 
 	"nimbus/api/logging"
@@ -29,12 +31,19 @@ import (
 // beat; the online controller is independent of it.
 const tickInterval = 2 * time.Second
 
-// StartController runs the Phase 1 online reconciler until ctx is cancelled.
-// Every tickInterval it snapshots all completed Nimbuses and reconciles each
-// one to the c_opt tier. Blocking; intended to be launched as `go
-// online.StartController(ctx, nw)`.
-func StartController(ctx context.Context, nw *watcher.NimbusWatcher) {
-	logging.Info(fmt.Sprintf("[online] event=controller_start interval=%s action=start", tickInterval))
+// defaultBudgetPct is the per-node serverless soft cap (OVERVIEW §5.5):
+// NIMBUS won't admit above this fraction of a node's allocatable CPU.
+// Overridable via NIMBUS_BUDGET_PCT.
+const defaultBudgetPct = 70
+
+// StartController runs the online polling reconciler — the self-healing
+// fallback (OVERVIEW Option A) that re-asserts the §8.3 waterfall every
+// tickInterval and owns the .status.online write. The primary online trigger
+// is the /decide RPC (StartDecideServer). Reads the shared BurstState; blocking;
+// launched as `go online.StartController(ctx, nw, bs)`.
+func StartController(ctx context.Context, nw *watcher.NimbusWatcher, bs *BurstState) {
+	pct := budgetPct()
+	logging.Info(fmt.Sprintf("[online] event=controller_start interval=%s budget_pct=%d action=start", tickInterval, pct))
 
 	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()
@@ -49,9 +58,20 @@ func StartController(ctx context.Context, nw *watcher.NimbusWatcher) {
 			logging.Info("[online] event=controller_stop action=stop reason=context_cancelled")
 			return
 		case <-ticker.C:
-			runTick(ctx, nw, last)
+			runTick(ctx, nw, last, bs, pct)
 		}
 	}
+}
+
+// budgetPct reads NIMBUS_BUDGET_PCT (default 70), clamped to [1,100].
+func budgetPct() int {
+	if v := os.Getenv("NIMBUS_BUDGET_PCT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= 100 {
+			return n
+		}
+		logging.Warning(fmt.Sprintf("[online] invalid NIMBUS_BUDGET_PCT=%q — using default %d", v, defaultBudgetPct))
+	}
+	return defaultBudgetPct
 }
 
 // runTick reconciles every completed Nimbus exactly once. The snapshot list is
@@ -60,7 +80,7 @@ func StartController(ctx context.Context, nw *watcher.NimbusWatcher) {
 //
 // Level-triggered: the tick_complete summary is logged only when at least one
 // Nimbus changed this tick, so a fully-converged cluster produces zero output.
-func runTick(ctx context.Context, nw *watcher.NimbusWatcher, last map[string]lastOutcome) {
+func runTick(ctx context.Context, nw *watcher.NimbusWatcher, last map[string]lastOutcome, bs *BurstState, pct int) {
 	completed := nw.ListCompleted()
 	if len(completed) == 0 {
 		return
@@ -80,7 +100,7 @@ func runTick(ctx context.Context, nw *watcher.NimbusWatcher, last map[string]las
 	totalAssignments := 0
 	tickChanged := false
 	for _, ev := range completed {
-		n, changed := ReconcileOne(ctx, ev, claimed, last)
+		n, changed := ReconcileOne(ctx, ev, claimed, last, bs, pct)
 		if n >= 0 {
 			reconciled++
 			totalAssignments += n

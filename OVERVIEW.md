@@ -4,10 +4,8 @@
 > Scope: a self-contained specification of inputs, algorithms, outputs, and the
 > design decisions behind each.
 >
-> Companion source-of-truth documents in this repository:
-> [README.md](README.md) · [offline.md](offline.md) · [online.md](online.md) ·
-> [online_impl.md](online_impl.md) · [online_flow.md](online_flow.md) ·
-> [CLAUDE.md](CLAUDE.md) · [measure_yolo_app.md](measure_yolo_app.md)
+> For the end-user how-to-use guide see [README.md](README.md). OVERVIEW.md
+> is self-contained — it does not depend on other docs in this repository.
 
 ---
 
@@ -318,12 +316,27 @@ both bounded by one operator-supplied input (`cpuBudget`):
 | **`c_opt`** | The CPU value where the latency curve **saturates** — increasing CPU further produces less than a small percent improvement in RT. The "knee" of the curve. NIMBUS's preferred tier. | Output of the offline binary search (one value per phase per node). |
 | **`c_min`** | The smallest CPU value at which measured RT is **within the user's SLO** budget. NIMBUS's fallback tier when `c_opt` doesn't fit. | Derived by `DeriveMin` from the sample curve produced by `runBinarySearch`: the nearest (smallest-CPU) sample whose RT meets the SLO. |
 
-There is no third "fallback floor" tier. If neither `c_opt` nor `c_min` fits
-any node in the live cluster, NIMBUS refuses to assign — the `/decide` call
-returns **Pending**, KPA aborts the scale-up, and the user-facing request
-times out at the activator. NIMBUS will not serve at a sub-`c_min` CPU
-that would violate the SLO the operator paid for. See
-[§8.3](#83-placement-decision) for how `Pending` is produced.
+### Thesis scope — cold-start optimization only
+
+The online stage optimizes the **cold/boost CPU only**. The steady-state warm
+side is **locked to `c_opt_warm`** across every tier: `ksvc.spec.template.spec
+.containers[0].resources.{requests,limits}.cpu = c_opt_warm` is written once
+by offline at saturation and never changes thereafter. The online waterfall
+varies only the `StartupCPUBoost` CR's `cpu` (the cold/boost value) and the
+ksvc `nodeSelector` (pool-wide or pinned). This keeps the steady-state CPU
+contract simple and makes cold-start the sole experimental dimension.
+
+### Graceful degradation, not strict refusal
+
+There **is** a third tier — `best_fit` — but it is degraded, pinned, and
+explicitly labelled as such. When neither `c_opt` nor `c_min` fits pool-wide,
+NIMBUS pins the ksvc to the node with the most free CPU and uses *all of that
+node's available room* as the cold/boost CPU. Admission floor is `c_opt_warm`:
+the pinned node must have at least `c_opt_warm` free so the post-revert
+steady-state request still fits. Below that, `/decide` returns **Pending** and
+KPA aborts the scale-up. The status row carries `tier=best_fit` and
+`degraded=true` for experiment-CSV attribution. See [§8.3](#83-placement-decision)
+for the full waterfall.
 
 Invariant: `c_min ≤ c_opt ≤ cpuBudget`, holding **independently for the
 cold and warm phases** (i.e. `c_min_cold ≤ c_opt_cold ≤ cpuBudget` and
@@ -394,8 +407,7 @@ controlled by that Nimbus belongs to the same pool.
 > equivalent. NIMBUS does **not** verify capacity/model across the pool —
 > it is the operator's responsibility to label only equal-compute nodes
 > together (and to use separate pools + separate Nimbus CRs for distinct
-> hardware classes). Aligns with cluster assumption **C6** in
-> [online.md §"Cluster assumption"](online.md) (homogeneous worker pool).
+> hardware classes).
 
 The offline reconciler runs on every worker tick where the Nimbus's
 `AllSaturated` flag is false. Per Nimbus, per tick:
@@ -862,62 +874,60 @@ calls it on every `0 → 1` scale-up, blocks on the response (within a
 bounded timeout), and proceeds to patch `Deployment.spec.replicas` using
 the returned `(nodeSelector, cpu, boostCpu)` triple.
 
-The decision is **mode-aware**: the burst-detector's `reserveRatio` is
-applied uniformly to all tiers, so under BURST mode NIMBUS spends a
-smaller fraction of `free[n]` per pod and leaves the rest for incoming
-cold-starts.
+The decision is **burst-aware**: the detector's `reserveRatio` shrinks each
+node's *usable* free CPU for the top two tiers (so a wave doesn't grab every
+last slice at `c_opt`). It does **not** skip the `c_opt` branch — there is no
+"force c_min in BURST" rule; the conservative behaviour falls out naturally
+when reduced `usable_n` prevents `c_opt` from fitting.
 
 #### Inputs and outputs
 
-The offline phase produces **two operating points per node per phase** —
-cold (used during the boost window) and warm (used at steady-state after
-the boost reverts). The placement decision reads both:
+The offline phase produces **two cold values and two warm values per
+representative node**; the warm side is locked to `c_opt_warm` across every
+online tier (thesis scope), so the waterfall picks only among the COLD values:
 
 ```text
 Inputs:
   ksvc            : namespace/name of the Knative service being scaled up
-  pool_label      : the pool selector copied from the ksvc's nodeSelector
-  BurstState      : read once, O(1), under RLock
-  free[n]         : live per-node free CPU =
-                    allocatable[n] − Σ pod.requests on n
+  pool_label      : the Nimbus's spec.placement.nodeSelector
+  BurstState      : read once, O(1), under RLock (mode, reserveRatio)
+  free_n          : live per-node free CPU =
+                    budget_n − Σ serverless-Knative committed_requests on n
+                    where budget_n = (NIMBUS_BUDGET_PCT/100) × allocatable_n
+  usable_n        : free_n × (1 − reserveRatio)         (Tiers 1 & 2 only)
 
-  Per-node tier values (read from status.perNode[n]):
-    c_opt_cold[n] : status.perNode[n].startingCpu     (cold knee — boost target)
-    c_opt_warm[n] : status.perNode[n].runningCpu      (warm knee — steady-state target)
-    c_min_cold[n] : status.perNode[n].cMinStarting    (cold smallest cpu ≤ SLO)
-    c_min_warm[n] : status.perNode[n].cMinRunning     (warm smallest cpu ≤ SLO)
+  Per-pool values (read from the offline profile — representative node):
+    c_opt_cold    : .status.perNode[rep].startingCpu      (Tier 1 boost CPU)
+    c_opt_warm    : .status.perNode[rep].runningCpu       (locked warm CPU)
+    c_min_cold    : .status.perNode[rep].cMinStarting     (Tier 2 boost CPU)
+    c_min_warm    :                                       (UNUSED — warm locked)
 
 Outputs (success):
-  nodeSelector : pool-wide  OR  specific kubernetes.io/hostname pin
-  cpu          : c_opt_warm[n]  OR  c_min_warm[n]    (written into ksvc spec;
-                                                      what kubelet enforces at
-                                                      steady-state after revert)
-  boostCpu     : c_opt_cold[n]  OR  c_min_cold[n]    (written into the boost CR;
-                                                      what the pod is born at)
-  tier         : c_opt | c_min                       (whichever tier was chosen)
+  tier         : c_opt | c_min | best_fit
+  nodeSelector : pool selector verbatim (Tiers 1 & 2)
+                  OR pool selector ∪ {kubernetes.io/hostname: <pinned>}  (Tier 3)
+  cpu          : c_opt_warm                             (locked across all tiers;
+                                                         written to ksvc spec
+                                                         requests=limits=cpu)
+  boostCpu     : c_opt_cold (T1) | c_min_cold (T2) | <pinned>.free_n (T3)
+                                                        (written to the
+                                                         StartupCPUBoost CR)
+  degraded     : false for T1/T2; true for T3 (cold below c_min_cold).
 
 Outputs (failure):
-  Pending      : the operator's bargain cannot be honored — NIMBUS refuses
-                 to assign rather than violate the SLO. KPA aborts the
-                 scale-up; the cold-start is rejected.
+  Pending      : no node has free_n ≥ c_opt_warm — the steady-state request
+                 wouldn't fit anywhere. KPA aborts the scale-up.
 ```
 
-A single tier choice (`c_opt` or `c_min`) selects **both** the cold and warm
-values for that node — `cpu` is the warm side, `boostCpu` is the cold side.
-The two values are independently measured by offline and differ in
-magnitude (cold is always larger because cold-start work dominates the
-boost window).
+**Headroom check uses the COLD value** (boost peak) for Tiers 1 and 2 — that
+is the peak CPU the pod occupies, because the kube-startup-cpu-boost webhook
+mutates `requests=limits=boostCpu` at admission. Tier 3's floor is `c_opt_warm`
+(the post-revert steady-state request must still fit on the pinned host).
 
-**Headroom check** uses the **cold** value (`boostCpu`), because that is the
-peak CPU the pod occupies — during the boost window, the kubelet enforces
-`requests == limits == boostCpu`. Sizing the bin-pack against the warm
-value would over-commit the node every time a pod is in its boost window.
-
-The decision never returns a sub-`c_min` CPU. If no node has enough
-headroom (after burst reserve) for any tier's `boostCpu`, NIMBUS returns
-`Pending` and the pod is not scheduled. The operator's contract —
-*cpu spent ≤ cpuBudget AND RT ≤ SLO* — is preserved by refusing to serve
-rather than serving badly.
+**Graceful degradation, not strict refusal.** When neither `c_opt` nor `c_min`
+fits pool-wide, Tier 3 admits with `degraded=true` at whatever the best-fit
+node can offer (always ≥ `c_opt_warm`). Pending occurs only when even
+`c_opt_warm` doesn't fit any node — i.e. the cluster is genuinely saturated.
 
 #### Pseudocode
 
@@ -925,62 +935,59 @@ rather than serving badly.
 on POST /decide (ksvc, pool_label):
 
     # ─── Step 1 — Snapshot burst state (cluster-wide, O(1)) ───────────
-    state := burstDetector.Read()
+    mode, reserveRatio := burstDetector.Read()
 
-    # ─── Step 2 — Snapshot live cluster headroom ──────────────────────
-    nodes := nodes_matching(pool_label)            # ready + schedulable
+    # ─── Step 2 — Snapshot live cluster headroom (budget-capped) ──────
+    nodes := nodes_matching(pool_label)            # Ready + schedulable
     for n in nodes:
-        free[n] := allocatable[n] − Σ committed_requests on n
+        budget_n := (NIMBUS_BUDGET_PCT / 100) × n.allocatable.cpu
+        used_n   := Σ requests of serverless-Knative pods bound to n
+        free_n   := max(0, budget_n − used_n)
+        usable_n := free_n × (1 − reserveRatio)    # NORMAL: =free_n
 
-    # ─── Step 3 — Read per-node tier values for BOTH phases ───────────
-    # The decision reads cold values (peak; boost target) and warm values
-    # (steady-state; runtime target) in lock-step. A single tier choice
-    # selects matched (cold, warm) pair from the same node.
-    for n in nodes:
-        c_opt_cold[n] := status.perNode[n].startingCpu
-        c_opt_warm[n] := status.perNode[n].runningCpu
-        c_min_cold[n] := status.perNode[n].cMinStarting
-        c_min_warm[n] := status.perNode[n].cMinRunning
+    # ─── Step 3 — Read tier values (warm locked to c_opt_warm) ────────
+    c_opt_cold := status.perNode[rep].startingCpu
+    c_opt_warm := status.perNode[rep].runningCpu      # ALSO the locked warm CPU
+    c_min_cold := status.perNode[rep].cMinStarting    # may be ""
 
-    # ─── Step 4 — Apply burst reserve uniformly ───────────────────────
-    # NORMAL: reserveRatio = 0      → usable = free
-    # BURST : reserveRatio = 0.30   → usable = free · 0.70
-    for n in nodes:
-        usable[n] := free[n] · (1 − state.reserveRatio)
+    # ─── Step 4 — 3-tier waterfall ────────────────────────────────────
+    pool_max_usable := max(usable_n over nodes)
 
-    # ─── Step 5 — Mode-aware waterfall ────────────────────────────────
-    # NORMAL: try c_opt pool-wide → c_min pinned → Pending
-    # BURST : skip c_opt entirely → c_min pinned → Pending
-    #
-    # Headroom check uses the COLD value (boostCpu) because that is the
-    # peak CPU the pod occupies during the boost window. The warm value
-    # is what the pod reverts to after /status returns READY and is what
-    # gets written into ksvc spec as requests = limits = cpu.
-
-    if state.mode == NORMAL:
-        if ∃ n ∈ nodes : usable[n] ≥ c_opt_cold[n]:
-            n* := any node satisfying the above
-            return (
-                nodeSelector : pool-wide,
-                cpu          : c_opt_warm[n*],     # ksvc spec runtime CPU
-                boostCpu     : c_opt_cold[n*],     # boost CR target
-                tier         : c_opt,
-                mode         : NORMAL,
-            )
-
-    # c_min — best-fit across nodes that fit at c_min's cold (peak) value.
-    fits := { n ∈ nodes : usable[n] ≥ c_min_cold[n] }
-    if fits ≠ ∅:
-        n* := argmin { usable[n] − c_min_cold[n] : n ∈ fits }
+    # Tier 1 — c_opt pool-wide
+    if pool_max_usable ≥ c_opt_cold:
         return (
-            nodeSelector : pin n*,
-            cpu          : c_min_warm[n*],         # ksvc spec runtime CPU
-            boostCpu     : c_min_cold[n*],         # boost CR target
-            tier         : c_min,
-            mode         : state.mode,
+            tier         : c_opt,
+            nodeSelector : pool selector,
+            cpu          : c_opt_warm,                # locked
+            boostCpu     : c_opt_cold,
+            degraded     : false,
         )
 
-    # Nothing fits. NIMBUS refuses to violate the SLO.
+    # Tier 2 — c_min pool-wide. Guard against the rare case c_min_cold <
+    # c_opt_warm (post-revert request must still fit any pool node).
+    if c_min_cold is defined and pool_max_usable ≥ max(c_min_cold, c_opt_warm):
+        return (
+            tier         : c_min,
+            nodeSelector : pool selector,
+            cpu          : c_opt_warm,                # locked
+            boostCpu     : c_min_cold,
+            degraded     : false,
+        )
+
+    # Tier 3 — best-fit pinned. Floor = c_opt_warm so the post-revert
+    # steady-state still fits the chosen host. Cold = the chosen node's
+    # full raw free_n. Reserve does NOT apply (already constrained).
+    best := argmax { n.free over nodes  :  n.free ≥ c_opt_warm }
+    if best ≠ ∅:
+        return (
+            tier         : best_fit,
+            nodeSelector : pool selector ∪ {kubernetes.io/hostname: best.name},
+            cpu          : c_opt_warm,                # locked
+            boostCpu     : format(best.free),         # node's full free room
+            degraded     : true,
+        )
+
+    # Pending — no node meets c_opt_warm. Cluster genuinely saturated.
     return Pending
 ```
 
@@ -1009,71 +1016,85 @@ spec and binds the new pod to the chosen node.
 
 #### Effect of mode on the same headroom snapshot
 
-Three workers each with `free = 800m`. Offline measured per-node:
+Three workers each with `free = 800m`. Offline measured for the pool:
 - `c_opt_cold = 700m`, `c_opt_warm = 400m`
-- `c_min_cold = 500m`, `c_min_warm = 250m`
+- `c_min_cold = 500m`
 
-The headroom check uses the **cold** value because that's the peak the pod
-holds during the boost window.
+The headroom check uses the **cold** value for Tiers 1/2 (the boost peak) and
+`c_opt_warm` for Tier 3 (the post-revert floor). The `cpu` (steady-state ksvc
+spec) is **always `c_opt_warm = 400m`** — only `boostCpu` varies.
 
 **NORMAL mode** (`reserveRatio = 0`):
 - `usable = 800m` everywhere.
-- `800m ≥ c_opt_cold 700m` ⇒ pick c_opt tier; pool-wide assignment.
-- Return `(pool-wide, cpu = 400m (warm), boostCpu = 700m (cold), tier = c_opt)`.
+- `800m ≥ c_opt_cold 700m` ⇒ Tier 1.
+- Return `(tier=c_opt, nodeSelector=pool-wide, cpu=400m, boostCpu=700m, degraded=false)`.
 
 **BURST mode** (`reserveRatio = 0.30`):
 - `usable = 800m × 0.70 = 560m` everywhere.
-- `560m ≥ c_opt_cold 700m` ? **No**, so the c_opt tier is skipped.
-- `560m ≥ c_min_cold 500m` ? **Yes** ⇒ pick c_min tier; best-fit pin
-  (all three tied at usable = 560m; alphabetical: `worker-1`).
-- Return `(pin worker-1, cpu = 250m (warm), boostCpu = 500m (cold), tier = c_min)`.
+- `560m ≥ c_opt_cold 700m` ? **No** — Tier 1 fails.
+- `560m ≥ max(c_min_cold 500m, c_opt_warm 400m) = 500m` ? **Yes** ⇒ Tier 2.
+- Return `(tier=c_min, nodeSelector=pool-wide, cpu=400m, boostCpu=500m, degraded=false)`.
 
-Same cluster state, two very different decisions — entirely because of the
-shared `BurstState`. The 240m of node headroom that NORMAL mode would have
-spent on the pod's boost window stays reserved for the next waves; and the
-pod's steady-state CPU is 150m lower in BURST (250m vs 400m), freeing
-additional node capacity for subsequent pods to land on.
+Same cluster state, different boost CPUs — entirely from the shared
+`BurstState`. The 240m of headroom NORMAL would have spent on the boost
+window stays reserved for the next waves. The steady-state `cpu = 400m` is
+unchanged (thesis: cold-only optimization).
+
+**Tier 3 (best_fit pinned) — when no node fits c_min cold-side:**
+Same workers but now `worker-1.free = 450m`, others = 200m (other workloads
+are using the budget). NORMAL mode:
+- Tier 1: 450m ≥ 700m? No.
+- Tier 2: 450m ≥ 500m? No.
+- Tier 3: ∃ node with `free ≥ c_opt_warm 400m`? Yes → `worker-1` (450m).
+- Return `(tier=best_fit, nodeSelector=pool ∪ {hostname:worker-1}, cpu=400m, boostCpu=450m, degraded=true)`.
+
+The pod admits at the best CPU `worker-1` can offer; its steady-state stays
+at `c_opt_warm`; the boost is below `c_min_cold` so the experiment row carries
+`degraded=true` for SLO attribution.
 
 ### 8.4 Output — `status.online`
 
-Each `/decide` call appends an assignment row to `status.online.assignments`.
-The row records what NIMBUS decided, under what burst mode, and what node
-the resulting pod actually landed on.
+Each reconcile writes the per-ksvc assignment set to `status.online.assignments`
+and the current cluster-wide `burstMode`. The schema below reflects the
+**implemented Go shape** (`OnlineStatus` / `OnlineAssignment`); a richer
+schema with `decidedAt`, `burstRate`, etc., is a still-open extension.
 
 ```yaml
 status:
   online:
-    burstMode: NORMAL              # current detector mode (cluster-wide)
-    burstRate: 0.42                # smoothed events/sec at last decision
-    burstDeltaRate: 0.05           # smoothed acceleration at last decision
+    burstMode: NORMAL                # current detector mode (cluster-wide)
     activeAssignments: 3
     assignments:
       - ksvc: measure-yolo-001
-        decidedAt: 2026-05-21T10:42:17Z
-        mode: NORMAL                # mode that drove this specific decision
-        nodeSelector: pool-wide
-        node: worker-2              # observed binding (populated by ksvc watcher)
+        node: serverless             # pool label value (Tier 1/2 pool-wide)
         tier: c_opt
-        cpu: 700m
-        boostCpu: 1500m
+        startingCpu: 937m            # cold/boost CPU (varies per tier)
+        runningCpu: 437m             # warm CPU (LOCKED to c_opt_warm)
+        degraded: false
+        ready: true
+        url: http://measure-yolo-001.serverless.svc.cluster.local/detect/local
       - ksvc: measure-yolo-002
-        decidedAt: 2026-05-21T10:42:39Z
-        mode: BURST                 # detector had flipped by this call
-        nodeSelector: pinned
-        node: worker-1
-        tier: c_min
-        cpu: 400m
-        boostCpu: 1000m
+        node: serverless
+        tier: c_min                  # NORMAL c_opt didn't fit, fell to c_min
+        startingCpu: 750m
+        runningCpu: 437m             # still c_opt_warm
+        degraded: false
+        ready: true
       - ksvc: measure-yolo-003
-        decidedAt: 2026-05-21T10:42:51Z
-        mode: BURST
-        nodeSelector: pending       # nothing fit under reserve; KPA aborted
-        state: Pending
+        node: worker-1               # Tier 3 pinned to this hostname
+        tier: best_fit
+        startingCpu: 500m            # = worker-1's full free_n
+        runningCpu: 437m             # still c_opt_warm
+        degraded: true               # cold < c_min_cold → degraded admit
+        ready: true
 ```
 
-The combination of `(ksvc, decidedAt, mode, tier, cpu)` is the
-join-key the experiment-driving harness uses to attribute observed
-request latencies back to the placement context.
+A Pending outcome carries `degraded: true` with `tier="", node="",
+startingCpu="", runningCpu=""` — no admission, no patch.
+
+The combination of `(ksvc, tier, startingCpu, degraded, burstMode)` is the
+join key the experiment harness uses to attribute observed request latencies
+back to the placement context. `runningCpu` is constant across rows by design.
 
 ---
 

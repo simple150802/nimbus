@@ -174,6 +174,12 @@ const (
 	// spec.acceptableResponseTime. Derived from the offline sample list
 	// via DeriveMin. NIMBUS's fallback tier when c_opt doesn't fit.
 	TierCMin = "c_min"
+	// TierBestFit is the degraded fallback: when neither c_opt nor c_min
+	// fits pool-wide, NIMBUS pins the ksvc to the node with the most free
+	// CPU and uses all of that node's available room as the cold/boost CPU.
+	// The warm side stays at c_opt_warm (thesis scope: cold-start
+	// optimization only). degraded=true on these assignment rows.
+	TierBestFit = "best_fit"
 )
 
 // OnlineStatus is the .status.online subtree — the online reconciler's
@@ -184,6 +190,11 @@ type OnlineStatus struct {
 	// field so `kubectl get -o wide` and quick health checks can read it
 	// without parsing the array.
 	ActiveAssignments int `json:"activeAssignments"`
+
+	// BurstMode is the cluster-wide burst-detector state ("NORMAL" | "BURST")
+	// that drove the most recent reconcile. Recorded for experiment-CSV
+	// correlation; the detector itself is process-global, not per-Nimbus.
+	BurstMode string `json:"burstMode,omitempty"`
 
 	// Assignments is one row per managed ksvc, in the order they appear
 	// in spec.selector.matchExpressions[0].values. A ksvc is omitted only

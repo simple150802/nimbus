@@ -245,12 +245,15 @@ func UnsetMaxScale(ctx context.Context, namespace, ksvcName string) error {
 // Both selector entries and runningCpu must be non-empty. `add` ops are
 // used throughout so the call succeeds whether or not the target paths
 // already exist on the ksvc.
-func ApplyKsvcSpec(ctx context.Context, namespace, ksvcName string, selector map[string]string, runningCpu string) error {
+//
+// Returns changed=true only when it issued a PATCH; a converged no-op returns
+// (false, nil) so callers (the online reconciler) stay silent when nothing moved.
+func ApplyKsvcSpec(ctx context.Context, namespace, ksvcName string, selector map[string]string, runningCpu string) (changed bool, err error) {
 	// No-op when nodeSelector and CPU (requests==limits) already match
 	// desired — a converged reconcile tick issues no write and logs nothing.
 	if curLimit, curReq, curSel, found := readKsvcApplyState(ctx, namespace, ksvcName); found &&
 		cpuEqual(curLimit, runningCpu) && cpuEqual(curReq, runningCpu) && selectorEqual(curSel, selector) {
-		return nil
+		return false, nil
 	}
 
 	logging.Info(fmt.Sprintf("[set] ksvc spec -> ns=%s ksvc=%s selector=%v cpu=%s",
@@ -281,7 +284,7 @@ func ApplyKsvcSpec(ctx context.Context, namespace, ksvcName string, selector map
 
 	payloadBytes, err := json.Marshal(patchPayload)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	_, err = DYNCLIENT.Resource(KSVC_GVR).Namespace(namespace).Patch(
@@ -291,7 +294,7 @@ func ApplyKsvcSpec(ctx context.Context, namespace, ksvcName string, selector map
 		payloadBytes,
 		metav1.PatchOptions{},
 	)
-	return err
+	return true, err
 }
 
 // PatchKsvcNodeSelector replaces the ksvc template's nodeSelector with the

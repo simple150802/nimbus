@@ -37,26 +37,27 @@ func noteSkip(last map[string]lastOutcome, key, reason string, logFn func()) boo
 	return true
 }
 
-// ReconcileOne reconciles a single completed Nimbus snapshot under the Phase 1
-// policy: assign the offline-converged c_opt tier to every listed ksvc — no
-// headroom math, no hostname pinning, no burst awareness (those are Phase 3).
-// For each existing ksvc it upserts the StartupCPUBoost CR, patches the running
-// CPU, and emits one status.online assignment row; then it writes the whole row
-// set to .status.online.
+// ReconcileOne is the polling self-healing fallback (OVERVIEW Option A): it
+// re-asserts the §8.3 waterfall against live headroom for every managed ksvc,
+// reading the shared BurstState but NOT feeding it (the /decide RPC is the
+// cold-start event source). The /decide handler gives zero-staleness on the
+// triggering pod; this loop catches fail-open + drift and owns the
+// .status.online write (single writer).
+//
+// Per ksvc: choose the CPU tier (c_opt pool-wide → c_min pool-wide → Pending;
+// no hostname pin — nodeSelector stays the pool selector offline wrote), apply
+// the tier's cold value to the boost CR + warm value to the ksvc spec, deduct
+// within-tick, and emit a status row. Pending rows carry degraded=true and are
+// not patched.
 //
 // Level-triggered: nothing is written and nothing is logged when the outcome is
-// unchanged from the previous tick. last carries the prior outcome per Nimbus
-// and is updated here. A change is "some ksvc patch/boost actually wrote" OR
-// "the assignment set differs from last tick"; only then do the per-ksvc
-// warnings, the status write, and the reconcile-complete line fire.
+// unchanged from the previous tick.
 //
-// claimed maps "ns/ksvc" -> owning Nimbus name for the current tick. A ksvc
-// already claimed by an earlier Nimbus this tick is skipped with a
-// duplicate_ksvc warning, so two completed Nimbuses can't fight over one ksvc.
-//
-// Returns (assignmentCount, changed); assignmentCount is -1 when the Nimbus is
-// skipped because it has no selector or no complete offline profile yet.
-func ReconcileOne(ctx context.Context, ev *nimbusevent.NimbusEvent, claimed map[string]string, last map[string]lastOutcome) (int, bool) {
+// claimed maps "ns/ksvc" -> owning Nimbus name for the current tick so two
+// Nimbuses can't fight over one ksvc. Returns (assignmentCount, changed);
+// assignmentCount is -1 when the Nimbus is skipped (no selector / no profile /
+// no Ready pool nodes).
+func ReconcileOne(ctx context.Context, ev *nimbusevent.NimbusEvent, claimed map[string]string, last map[string]lastOutcome, bs *BurstState, pct int) (int, bool) {
 	ns := ev.Metadata.Namespace
 	nimbus := ev.Metadata.Name
 	key := ns + "/" + nimbus
@@ -68,7 +69,7 @@ func ReconcileOne(ctx context.Context, ev *nimbusevent.NimbusEvent, claimed map[
 		})
 	}
 
-	node, profile := selectProfileNode(ev)
+	_, profile := selectProfileNode(ev)
 	if profile == nil {
 		return -1, noteSkip(last, key, "no_complete_profile", func() {
 			logging.Warning(fmt.Sprintf("[online][nimbus] event=nimbus_skip_unsaturated ns=%s nimbus=%s action=skip reason=no_complete_profile",
@@ -76,18 +77,21 @@ func ReconcileOne(ctx context.Context, ev *nimbusevent.NimbusEvent, claimed map[
 		})
 	}
 
-	// Phase 1 applies the c_opt tier. c_min is extracted into the profile too
-	// (Phase 2) and surfaced in the decide log so it's observable before the
-	// Phase 3 waterfall consumes it; it does not influence the choice yet.
-	startingCpu := profile.OptStarting
-	runningCpu := profile.OptRunning
+	snap, err := buildPoolSnapshot(ctx, ev.Spec.Placement.NodeSelector, ns, pct)
+	if err != nil {
+		return -1, noteSkip(last, key, "no_pool_nodes", func() {
+			logging.Warning(fmt.Sprintf("[online][nimbus] event=nimbus_skip_unsaturated ns=%s nimbus=%s action=skip reason=no_pool_nodes detail=%v",
+				ns, nimbus, err))
+		})
+	}
+	mode, reserve, _ := bs.Read()
+	poolLabel := poolLabelValue(ev.Spec.Placement.NodeSelector)
 	warmPath := ev.Spec.DurationPolicy.WarmApiCondition.Path
 	ksvcs := ev.Selector.MatchExpressions[0].Values
 
 	anyWrite := false
-	// pending holds warnings (duplicate ksvc / missing ksvc) that are flushed
-	// only if this tick is a change — so a persistently-missing ksvc doesn't
-	// re-warn every 2s.
+	// pending holds warnings (duplicate / missing / no-fit) flushed only if this
+	// tick is a change — so a persistent condition doesn't re-warn every 2s.
 	var pending []func()
 	assignments := make([]nimbusevent.OnlineAssignment, 0, len(ksvcs))
 	for _, ksvc := range ksvcs {
@@ -112,34 +116,56 @@ func ReconcileOne(ctx context.Context, ev *nimbusevent.NimbusEvent, claimed map[
 			continue
 		}
 
-		// c_opt apply: per-ksvc StartupCPUBoost (cold value) + running CPU.
-		// Both helpers no-op when already converged; we log ksvc_decide only
-		// when one of them actually wrote.
-		bchanged := kubeapi.CreateStartupCPUBoost(ctx, ev, ksvc, startingCpu)
-		pchanged, err := kubeapi.PatchResourceLimits(ctx, ns, ksvc, runningCpu)
-		if err != nil {
-			logging.Failure(fmt.Sprintf("[online][error] event=ksvc_patch_cpu ns=%s nimbus=%s ksvc=%s action=patch reason=%v",
-				ns, nimbus, ksvc, err))
-			// Record the row anyway; the next tick re-attempts the patch.
-		}
-		if bchanged || pchanged {
-			anyWrite = true
-			logging.Info(fmt.Sprintf("[online][ksvc] event=ksvc_decide ns=%s nimbus=%s ksvc=%s node=%s tier=%s starting=%s running=%s cmin_starting=%s cmin_running=%s action=patch",
-				ns, nimbus, ksvc, node, nimbusevent.TierCOpt, startingCpu, runningCpu, profile.MinStarting, profile.MinRunning))
-		}
+		// Waterfall: pick the CPU tier; deduct within-tick so later ksvcs see
+		// reduced headroom. nodeSelector is untouched (pool selector stays).
+		d := decideTier(profile, snap, mode, reserve)
+		deductCold(snap, d)
 
-		assignments = append(assignments, nimbusevent.OnlineAssignment{
-			Ksvc:        ksvc,
-			Node:        node,
-			Tier:        nimbusevent.TierCOpt,
-			StartingCpu: startingCpu,
-			RunningCpu:  runningCpu,
-			Ready:       ready,
-			URL:         kubeapi.BuildKsvcStatusURL(ns, ksvc, warmPath),
-		})
+		row := nimbusevent.OnlineAssignment{
+			Ksvc:  ksvc,
+			Ready: ready,
+			URL:   kubeapi.BuildKsvcStatusURL(ns, ksvc, warmPath),
+		}
+		if !d.admitted {
+			row.Degraded = true
+			pending = append(pending, func() {
+				logging.Warning(fmt.Sprintf("[online][warn] event=ksvc_pending ns=%s nimbus=%s ksvc=%s mode=%s action=no_admission reason=no_node_meets_c_opt_warm",
+					ns, nimbus, ksvc, mode))
+			})
+		} else {
+			// Tier 3 pins; Tiers 1/2 stay pool-wide. ApplyKsvcSpec replaces
+			// nodeSelector wholesale, so a transition Tier3→Tier1/2 drops the
+			// stale hostname pin automatically. The warm value is always
+			// c_opt_warm (thesis: cold-start optimization only) — ApplyKsvcSpec
+			// no-ops on identical CPU, so the call is cheap.
+			selector := buildSelector(ev.Spec.Placement.NodeSelector, d)
+			if d.node != "" {
+				row.Node = d.node
+			} else {
+				row.Node = poolLabel
+			}
+			row.Tier = d.tier
+			row.StartingCpu = d.cold
+			row.RunningCpu = d.warm
+			row.Degraded = d.degraded
+
+			// Both helpers no-op when converged; log ksvc_decide only on a write.
+			bchanged := kubeapi.CreateStartupCPUBoost(ctx, ev, ksvc, d.cold)
+			pchanged, perr := kubeapi.ApplyKsvcSpec(ctx, ns, ksvc, selector, d.warm)
+			if perr != nil {
+				logging.Failure(fmt.Sprintf("[online][error] event=ksvc_apply ns=%s nimbus=%s ksvc=%s action=apply reason=%v",
+					ns, nimbus, ksvc, perr))
+			}
+			if bchanged || pchanged {
+				anyWrite = true
+				logging.Info(fmt.Sprintf("[online][ksvc] event=ksvc_decide ns=%s nimbus=%s ksvc=%s tier=%s node=%s mode=%s cold=%s warm=%s degraded=%v action=patch",
+					ns, nimbus, ksvc, d.tier, row.Node, mode, d.cold, d.warm, d.degraded))
+			}
+		}
+		assignments = append(assignments, row)
 	}
 
-	desired := buildOnlineStatus(assignments)
+	desired := buildOnlineStatus(assignments, mode)
 	prev := last[key]
 	statusChanged := prev.skipReason != "" || !reflect.DeepEqual(prev.online, desired)
 	changed := anyWrite || statusChanged
@@ -156,8 +182,8 @@ func ReconcileOne(ctx context.Context, ev *nimbusevent.NimbusEvent, claimed map[
 				ns, nimbus, err))
 			// Leave last unchanged so the next tick retries the write.
 		} else {
-			logging.Info(fmt.Sprintf("[online][status] event=status_write ns=%s nimbus=%s assignments=%d action=write",
-				ns, nimbus, len(assignments)))
+			logging.Info(fmt.Sprintf("[online][status] event=status_write ns=%s nimbus=%s assignments=%d mode=%s action=write",
+				ns, nimbus, len(assignments), mode))
 			last[key] = lastOutcome{online: desired}
 		}
 	}

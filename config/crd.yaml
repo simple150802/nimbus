@@ -517,18 +517,29 @@ spec:
                         and for quick health checks without parsing the array.
                       type: integer
                       minimum: 0
+                    burstMode:
+                      description: |
+                        Cluster-wide burst-detector state that drove the most
+                        recent reconcile: NORMAL (full free CPU) or BURST
+                        (reserve held back, prefers c_min). The detector is
+                        process-global, not per-Nimbus; recorded here for
+                        experiment-CSV correlation.
+                      type: string
+                      enum: ["NORMAL", "BURST"]
                     assignments:
                       description: |
                         One row per managed ksvc, in the order they appear in
                         spec.selector.matchExpressions[0].values. A row is
-                        produced even if the ksvc could only be assigned at
-                        tier=c_floor with degraded=true; the only reason a
-                        listed ksvc is omitted is that it does not exist in
-                        the cluster (the reconciler logs and skips).
+                        produced even if the ksvc could not be admitted
+                        (Pending: degraded=true, no tier/node/cpu); the only
+                        reason a listed ksvc is omitted is that it does not
+                        exist in the cluster (the reconciler logs and skips).
                       type: array
                       items:
                         type: object
-                        required: [ksvc, node, tier, startingCpu, runningCpu]
+                        # Only ksvc is guaranteed: a Pending row (no tier fit)
+                        # carries degraded=true and omits node/tier/cpu.
+                        required: [ksvc]
                         properties:
                           ksvc:
                             description: |
@@ -538,23 +549,25 @@ spec:
                             type: string
                           node:
                             description: |
-                              Kubernetes node selected for this ksvc. Patched
-                              onto the ksvc as
-                              spec.template.spec.nodeSelector["kubernetes.io/hostname"].
-                              Must be in the Nimbus's candidate-nodes set and
-                              must have profile data in status.perNode.
+                              Placement indicator. For Tier 1/2 (pool-wide) this
+                              is the pool label value (e.g. "serverless") —
+                              kube-scheduler picks the host. For Tier 3
+                              (best_fit) this is the chosen hostname NIMBUS pinned
+                              the ksvc to via spec.template.spec.nodeSelector
+                              ["kubernetes.io/hostname"]. Empty on a Pending row.
                             type: string
                           tier:
                             description: |
-                              Performance tier assigned by the waterfall
-                              scheduler. c_opt = offline-converged knee from
-                              status.perNode. c_min = smallest sampled CPU
-                              meeting spec.acceptableResponseTime (only
-                              available when that field is set). c_floor =
-                              spec.resourcePolicy...limits.min; no SLO
-                              guarantee. See online.md §"CPU Tier Model".
+                              CPU tier the waterfall chose. c_opt / c_min are
+                              pool-wide (kube-scheduler picks the node).
+                              best_fit is the degraded fallback: pinned to the
+                              node with most free CPU, with cold = that node's
+                              full free_n (warm always c_opt_warm; thesis scope
+                              is cold-start optimization only). Omitted on a
+                              Pending row (no node meets c_opt_warm; degraded=true).
+                              See OVERVIEW §8.3.
                             type: string
-                            enum: ["c_opt", "c_min", "c_floor"]
+                            enum: ["c_opt", "c_min", "best_fit"]
                           startingCpu:
                             description: |
                               Cold-phase CPU value written into the per-ksvc

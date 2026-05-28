@@ -216,7 +216,7 @@ func (nw *NimbusWatcher) RunWorker(ctx context.Context) {
 				RunningCpu:   runningMax,
 			}
 
-			if err := kubeapi.ApplyKsvcSpec(ctx, current.Metadata.Namespace, ksvc,
+			if _, err := kubeapi.ApplyKsvcSpec(ctx, current.Metadata.Namespace, ksvc,
 				current.Spec.Placement.NodeSelector, runningMax); err != nil {
 				// Skip the boost CR write on apply failure so we don't
 				// leave the cluster with a boost CR pointing at a ksvc

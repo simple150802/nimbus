@@ -46,9 +46,11 @@ ken/
 - Sample export to disk (`spec.export.dir` → `results/<timestamp>/` with raw CSVs + `meta.json` + per-node `result.json`).
 - Sample preload from a previous export (`spec.preMeasured.loadFromDir`) — skips re-measurement.
 
-**What is designed but NOT yet implemented** (don't expect this to work — it's spec only):
+**What works partially** (in-process, runnable; the Knative-side fork is the missing piece):
 
-- The **online** stage (adaptive pinning, KPA-fork RPC, EWMA burst detector, 70%-per-node headroom budget, degrade waterfall). Don't expect any of this to run yet.
+- The **online** decision engine: synchronous `POST /decide` HTTP endpoint, 3-tier waterfall (`c_opt` pool-wide → `c_min` pool-wide → `best_fit` pinned), EWMA burst detector, 70 %-per-node headroom budget, polling self-healer that re-asserts the same waterfall every 2 s.
+- The steady-state warm CPU is locked to `c_opt_warm` on every tier — the thesis scope is cold-start optimization, so only the boost CR's cpu varies per tier.
+- **What's still missing**: the Knative KPA fork at `scaler.go::applyScale` that synchronously calls `/decide` on `0→1` cold-start. Until it lands, the polling loop is the only consumer of the waterfall and the burst detector has no event source (mode stays NORMAL).
 
 **What's out of scope** (and won't be added):
 
