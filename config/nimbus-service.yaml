@@ -1,0 +1,59 @@
+# Service that makes the out-of-cluster NIMBUS process reachable from in-cluster
+# pods (the forked autoscaler / kpa) via a stable DNS name:
+#
+#   http://nimbus.knative-serving.svc.cluster.local:8080/decide
+#
+# NIMBUS runs as `go run ./cmd` directly on the host (currently the master node
+# at 192.168.10.134). Because the process is not pod-backed, the Service uses
+# NO label selector and is paired with a hand-written Endpoints object pointing
+# at the host's IP. kube-proxy translates the ClusterIP to that IP on each hop.
+#
+# Why this namespace: the only consumer today is the autoscaler Deployment in
+# `knative-serving`, so co-locating the Service shortens the DNS name and keeps
+# the in-cluster scope obvious. If NIMBUS later runs as a real Deployment,
+# replace the Endpoints with a normal selector and the consumers do not change.
+#
+# Apply once after the namespace exists (always — knative-serving is installed
+# by Knative itself):
+#
+#   kubectl apply -f config/nimbus-service.yaml
+#
+# If NIMBUS ever moves to another host, update both `addresses[0].ip` AND
+# (optionally) restart the autoscaler so the cached connection drops.
+apiVersion: v1
+kind: Service
+metadata:
+  name: nimbus
+  namespace: knative-serving
+  labels:
+    app.kubernetes.io/name: nimbus
+    app.kubernetes.io/component: decide
+spec:
+  # No selector — backing endpoint is an off-cluster process, listed manually
+  # in the Endpoints object below.
+  ports:
+    - name: decide
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+  type: ClusterIP
+---
+# Manual Endpoints — must have the same name as the Service above. kube-proxy
+# treats this as the backing pool for the Service's ClusterIP.
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: nimbus
+  namespace: knative-serving
+  labels:
+    app.kubernetes.io/name: nimbus
+    app.kubernetes.io/component: decide
+subsets:
+  - addresses:
+      # Master node IP — where the NIMBUS process listens. Change this single
+      # field if NIMBUS moves to a different host.
+      - ip: 192.168.10.134
+    ports:
+      - name: decide
+        port: 8080
+        protocol: TCP

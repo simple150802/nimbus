@@ -37,15 +37,15 @@ spec:
   # Optional: must match the metric used when the loaded run was exported,
   # otherwise the loader logs a [preMeasured] mismatch warning and the
   # loaded CPU values reflect the *original* run's metric, not this one.
-  # metric: p95
+  metric: p95
 
   # Optional: latency budgets. For preload, keep these identical to
   # the exported run because result.json imports cMinStarting/cMinRunning
   # as SLO-derived snapshots. If you change the SLO or metric, re-measure
   # instead of treating the imported c_min values as valid.
-  # acceptableResponseTime:
-  #   cold: 1500
-  #   warm: 50
+  acceptableResponseTime:
+    cold: 15000
+    warm: 1500
 
   # Path to the timestamped run directory produced by a previous
   # config/my-boost-export.yaml apply. Edit the timestamp to match your
@@ -53,6 +53,22 @@ spec:
   # identical to spec.export.dir (relative against cwd, absolute as-is).
   preMeasured:
     loadFromDir: "./results/backup-tuned"
+
+  # Optional: per-Nimbus online-stage opt-out.
+  #   online.enabled: true   → online stage active for this Nimbus
+  #                            (waterfall picks tier per cold-start, polling
+  #                             reconciler maintains .status.online).
+  #   online.enabled: false  → /decide returns "passthrough" for this Nimbus's
+  #                            ksvcs, polling reconciler skips it. KPA's hook
+  #                            then proceeds with the upstream replicas-only
+  #                            patch; the ksvc still has whatever offline /
+  #                            preload wrote (pool selector + c_opt_warm +
+  #                            boost CR at c_opt_cold) — so cold-start still
+  #                            benefits from the loaded profile, just without
+  #                            adaptive tier downgrade / hostname pinning.
+  # Absent / commented = default true (online active). Uncomment to opt out.
+  online:
+    enabled: false
 
   # Same workload definition as the export manifest — required fields. The
   # controller still creates the StartupCPUBoost CR + patches the ksvc CPU

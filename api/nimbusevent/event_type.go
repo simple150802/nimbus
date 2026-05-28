@@ -335,24 +335,27 @@ type NimbusSpec struct {
 // per-Nimbus online tunables later (e.g. burst overrides) without another
 // CRD migration.
 type OnlineSpec struct {
-	// Enabled controls whether the online stage acts on this Nimbus.
-	// Pointer-bool so we can distinguish unset (treated as true) from
-	// explicit false. When false:
-	//   - The polling reconciler SKIPS this Nimbus (no waterfall, no
-	//     .status.online write). Offline state on .status.perNode and
-	//     .status.applied is unaffected.
-	//   - /decide returns "passthrough" for managed ksvcs (KPA proceeds
-	//     with the existing ksvc spec — already pool-wide at c_opt_warm
-	//     from offline's bootstrap apply).
+	// Enabled controls whether the online stage's ADAPTIVE behaviour acts on
+	// this Nimbus. Pointer-bool so we can distinguish unset (treated as true)
+	// from explicit false. When false:
+	//   - The polling reconciler skips the WATERFALL (no c_min downgrade, no
+	//     best_fit hostname pinning) and the .status.online write — but DOES
+	//     re-assert offline's bootstrap state every tick (pool selector,
+	//     c_opt_warm CPU, max-scale=1, boost CR at c_opt_cold) via
+	//     enforceOfflineBootstrap. So drift gets corrected without waiting
+	//     for the next Nimbus CR edit.
+	//   - /decide returns "passthrough" for managed ksvcs (KPA proceeds with
+	//     the existing ksvc spec — already pool-wide at c_opt_warm from
+	//     offline + the polling reconciler's continuous re-assertion).
 	//   - The burst detector STILL observes the cold-start (cluster-wide
 	//     rate must remain accurate so other Nimbuses' waterfalls react
 	//     correctly).
 	//
 	// Offline is untouched: the binary search, profile persistence, and
 	// per-ksvc StartupCPUBoost CR at c_opt_cold all happen regardless of
-	// this flag. So offline-only mode is fully functional for cold-start
-	// boost; what disappears is the adaptive waterfall (c_min downgrade
-	// under pressure, best_fit pin under saturation).
+	// this flag. Offline-only mode is fully functional for cold-start boost;
+	// what disappears is only the adaptive waterfall (c_min downgrade under
+	// pressure, best_fit pin under saturation). Drift correction is preserved.
 	Enabled *bool `json:"enabled,omitempty"`
 }
 

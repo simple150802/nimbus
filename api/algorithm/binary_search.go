@@ -66,16 +66,14 @@ func BinarySearch(ctx context.Context, current *nimbusevent.NimbusEvent, node st
 
 	// Pin the ksvc to one pod for the whole search — both the starting and
 	// running phases need deterministic measurement, so neither should share
-	// traffic across multiple pods. Cleared on any exit path via defer so the
-	// cap never outlives the search.
+	// traffic across multiple pods. NOT unset on exit: the apply loops
+	// re-assert max-scale=1 permanently for NIMBUS-managed ksvcs (thesis
+	// invariant: each cold-start is a single-pod event), and unsetting here
+	// would create a brief window between search-exit and the next reconcile
+	// where KPA could pick desiredScale > 1.
 	if err := kubeapi.PatchMaxScale(ctx, ns, ksvc); err != nil {
 		return "", fmt.Errorf("failed to set maxScale=1 before binary search: %w", err)
 	}
-	defer func() {
-		if err := kubeapi.UnsetMaxScale(ctx, ns, ksvc); err != nil {
-			logging.Warning("failed to unset maxScale after binary search:", err)
-		}
-	}()
 
 	if _, err := binarySearchForStartingPhase(ctx, current, node); err != nil {
 		return "", fmt.Errorf("starting phase aborted: %w", err)

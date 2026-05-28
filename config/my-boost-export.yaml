@@ -50,6 +50,22 @@ spec:
   export:
     dir: "./results"
 
+  # Optional: per-Nimbus online-stage opt-out.
+  #   online.enabled: true   → online stage active for this Nimbus
+  #                            (waterfall picks tier per cold-start, polling
+  #                             reconciler maintains .status.online).
+  #   online.enabled: false  → /decide returns "passthrough" for this Nimbus's
+  #                            ksvcs, polling reconciler skips it. KPA's hook
+  #                            then proceeds with the upstream replicas-only
+  #                            patch; the ksvc still has whatever offline
+  #                            wrote (pool selector + c_opt_warm + boost CR
+  #                            at c_opt_cold) — so cold-start still benefits
+  #                            from offline measurement, just without
+  #                            adaptive tier downgrade / hostname pinning.
+  # Absent / commented = default true (online active). Uncomment to opt out.
+  online:
+    enabled: false
+
   # Cold samples are expensive (each forces a scale-to-zero before a fresh
   # cold start). Omit `measurement` entirely to accept the CRD defaults
   # (1 cold sample, 10 warm samples).

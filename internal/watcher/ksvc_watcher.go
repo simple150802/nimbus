@@ -97,6 +97,11 @@ func (nw *NimbusWatcher) maybePatchNewKsvc(ctx context.Context, ksvc *unstructur
 				logging.Info("Propagating RunningCPU to new ksvc:",
 					ns+"/"+name, "->", runningMax)
 			}
+			// Same max-scale=1 invariant the offline + online apply loops enforce.
+			// Idempotent — no-ops when the annotation is already present.
+			if err := kubeapi.PatchMaxScale(ctx, ns, name); err != nil {
+				logging.Failure("ksvc watcher: maxScale patch failed:", err)
+			}
 			return
 		}
 	}

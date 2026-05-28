@@ -38,6 +38,56 @@ func noteSkip(last map[string]lastOutcome, key, reason string, logFn func()) boo
 	return true
 }
 
+// enforceOfflineBootstrap re-asserts the offline-applied state on every managed
+// ksvc — pool selector, c_opt_warm CPU, max-scale=1, boost CR at c_opt_cold.
+// Used when spec.online.enabled=false: the adaptive waterfall and status.online
+// write are skipped, but drift correction is not. Without this an "offline only"
+// baseline silently breaks when anything edits a managed ksvc between Nimbus CR
+// re-applies.
+//
+// Returns true iff at least one apiserver write happened this call. Both
+// helpers (ApplyKsvcSpec, CreateStartupCPUBoost) are no-op-aware, so a
+// converged tick issues no writes and no log lines.
+//
+// claimed is the per-tick "ns/ksvc -> owning Nimbus" map (same semantics as
+// the waterfall path) so two Nimbuses can't fight over one ksvc.
+func enforceOfflineBootstrap(ctx context.Context, ev *nimbusevent.NimbusEvent, claimed map[string]string) bool {
+	ns := ev.Metadata.Namespace
+	nimbus := ev.Metadata.Name
+	selector := ev.Spec.Placement.NodeSelector
+	if len(selector) == 0 || len(ev.Selector.MatchExpressions) == 0 {
+		return false
+	}
+	_, prof := selectProfileNode(ev)
+	if prof == nil {
+		// Offline hasn't saturated yet — nothing to re-assert against.
+		return false
+	}
+
+	anyChanged := false
+	for _, ksvc := range ev.Selector.MatchExpressions[0].Values {
+		k := ns + "/" + ksvc
+		if owner, ok := claimed[k]; ok && owner != nimbus {
+			continue // owned by another Nimbus this tick — silent skip
+		}
+		claimed[k] = nimbus
+
+		bchanged := kubeapi.CreateStartupCPUBoost(ctx, ev, ksvc, prof.OptStarting)
+		pchanged, perr := kubeapi.ApplyKsvcSpec(ctx, ns, ksvc, selector, prof.OptRunning)
+		if perr != nil {
+			logging.Failure(fmt.Sprintf("[online][error] event=offline_bootstrap_apply ns=%s nimbus=%s ksvc=%s reason=%v",
+				ns, nimbus, ksvc, perr))
+			continue
+		}
+		if bchanged || pchanged {
+			anyChanged = true
+			logging.Info(fmt.Sprintf("[online][bootstrap] event=offline_enforce ns=%s nimbus=%s ksvc=%s cold=%s warm=%s action=patch",
+				ns, nimbus, ksvc, prof.OptStarting, prof.OptRunning))
+		}
+	}
+	return anyChanged
+}
+
 // ReconcileOne is the polling self-healing fallback (OVERVIEW Option A): it
 // re-asserts the §8.3 waterfall against live headroom for every managed ksvc,
 // reading the shared BurstState but NOT feeding it (the /decide RPC is the
@@ -71,10 +121,20 @@ func ReconcileOne(ctx context.Context, ev *nimbusevent.NimbusEvent, claimed map[
 	}
 
 	// Per-Nimbus online opt-out (spec.online.enabled=false). Offline still
-	// runs (binary search, profile, bootstrap apply, boost CR); we just don't
-	// run the waterfall or write .status.online for this Nimbus. /decide
-	// handles its own short-circuit (server.go) for the same flag.
+	// runs (binary search, profile, bootstrap apply, boost CR); the waterfall
+	// + .status.online write + hostname pinning are skipped. BUT drift on
+	// pool-selector / c_opt_warm CPU / max-scale=1 / boost CR is still
+	// corrected every tick by enforceOfflineBootstrap — otherwise a third
+	// party edit between Nimbus reconciles silently breaks the offline-only
+	// baseline. /decide handles its own short-circuit (server.go).
 	if !ev.Spec.OnlineEnabled() {
+		if enforceOfflineBootstrap(ctx, ev, claimed) {
+			// Drift was corrected this tick. Skip the "first-entry" noteSkip
+			// log so a subsequent silent tick stays quiet (same skipReason
+			// key keeps noteSkip's state machine consistent).
+			last[key] = lastOutcome{skipReason: "online_disabled"}
+			return -1, true
+		}
 		return -1, noteSkip(last, key, "online_disabled", func() {
 			logging.Info(fmt.Sprintf("[online][nimbus] event=skip_offline_only ns=%s nimbus=%s action=skip reason=spec.online.enabled=false",
 				ns, nimbus))

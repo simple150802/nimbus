@@ -19,12 +19,14 @@ import (
 // helpers can skip a no-op write when the ksvc already matches desired
 // state (level-triggered reconcile: a converged tick issues no PATCH and
 // logs nothing). cpuLimit/cpuRequest are container[0]'s values ("" if
-// unset); selector is spec.template.spec.nodeSelector. found is false when
-// the ksvc can't be read — callers then fall through to write (create-through).
-func readKsvcApplyState(ctx context.Context, namespace, ksvcName string) (cpuLimit, cpuRequest string, selector map[string]string, found bool) {
+// unset); selector is spec.template.spec.nodeSelector; maxScale is the
+// autoscaling.knative.dev/max-scale annotation on the revision template
+// ("" if unset). found is false when the ksvc can't be read — callers
+// then fall through to write (create-through).
+func readKsvcApplyState(ctx context.Context, namespace, ksvcName string) (cpuLimit, cpuRequest string, selector map[string]string, maxScale string, found bool) {
 	obj, err := DYNCLIENT.Resource(KSVC_GVR).Namespace(namespace).Get(ctx, ksvcName, metav1.GetOptions{})
 	if err != nil {
-		return "", "", nil, false
+		return "", "", nil, "", false
 	}
 	selector, _, _ = unstructured.NestedStringMap(obj.Object, "spec", "template", "spec", "nodeSelector")
 	containers, _, _ := unstructured.NestedSlice(obj.Object, "spec", "template", "spec", "containers")
@@ -34,7 +36,8 @@ func readKsvcApplyState(ctx context.Context, namespace, ksvcName string) (cpuLim
 			cpuRequest, _, _ = unstructured.NestedString(c0, "resources", "requests", "cpu")
 		}
 	}
-	return cpuLimit, cpuRequest, selector, true
+	maxScale, _, _ = unstructured.NestedString(obj.Object, "spec", "template", "metadata", "annotations", "autoscaling.knative.dev/max-scale")
+	return cpuLimit, cpuRequest, selector, maxScale, true
 }
 
 // cpuEqual compares two CPU quantity strings semantically, so "1000m" and
@@ -135,7 +138,7 @@ func MonitorKsvcResources(ctx context.Context, phase, namespace, ksvcName string
 func PatchResourceLimits(ctx context.Context, namespace, ksvcName, cpuLimit string) (changed bool, err error) {
 	// No-op when the ksvc already carries this CPU on both requests and
 	// limits — a converged reconcile tick issues no write and logs nothing.
-	if curLimit, curReq, _, found := readKsvcApplyState(ctx, namespace, ksvcName); found &&
+	if curLimit, curReq, _, _, found := readKsvcApplyState(ctx, namespace, ksvcName); found &&
 		cpuEqual(curLimit, cpuLimit) && cpuEqual(curReq, cpuLimit) {
 		return false, nil
 	}
@@ -171,8 +174,16 @@ func PatchResourceLimits(ctx context.Context, namespace, ksvcName, cpuLimit stri
 }
 
 // PatchMaxScale stamps autoscaling.knative.dev/max-scale=1 on the ksvc so
-// the search probes against a single, deterministic pod.
+// the search probes against a single, deterministic pod. Idempotent: when
+// the annotation already reads "1" the helper short-circuits with no write
+// and no log line — so the offline binary search prelude AND the apply
+// loops can both call it without churn.
 func PatchMaxScale(ctx context.Context, namespace, ksvcName string) error {
+	// No-op when the ksvc already carries max-scale=1.
+	if _, _, _, curMaxScale, found := readKsvcApplyState(ctx, namespace, ksvcName); found && curMaxScale == "1" {
+		return nil
+	}
+
 	logging.Info(fmt.Sprintf("[set] ksvc maxScale=1 -> ns=%s ksvc=%s", namespace, ksvcName))
 
 	patchPayload := []map[string]interface{}{
@@ -251,8 +262,9 @@ func UnsetMaxScale(ctx context.Context, namespace, ksvcName string) error {
 func ApplyKsvcSpec(ctx context.Context, namespace, ksvcName string, selector map[string]string, runningCpu string) (changed bool, err error) {
 	// No-op when nodeSelector and CPU (requests==limits) already match
 	// desired — a converged reconcile tick issues no write and logs nothing.
-	if curLimit, curReq, curSel, found := readKsvcApplyState(ctx, namespace, ksvcName); found &&
-		cpuEqual(curLimit, runningCpu) && cpuEqual(curReq, runningCpu) && selectorEqual(curSel, selector) {
+	if curLimit, curReq, curSel, curMaxScale, found := readKsvcApplyState(ctx, namespace, ksvcName); found &&
+		cpuEqual(curLimit, runningCpu) && cpuEqual(curReq, runningCpu) && selectorEqual(curSel, selector) &&
+		curMaxScale == "1" {
 		return false, nil
 	}
 
@@ -279,6 +291,16 @@ func ApplyKsvcSpec(ctx context.Context, namespace, ksvcName string, selector map
 			"op":    "add",
 			"path":  "/spec/template/spec/containers/0/resources/requests/cpu",
 			"value": runningCpu,
+		},
+		// Pin every NIMBUS-managed ksvc to max-scale=1 so each cold-start is a
+		// single-pod measurement event (no horizontal burst muddying thesis
+		// experiments). The annotation key path uses ~1 because JSON-pointer
+		// escapes '/' as "~1". Knative-idiomatic location: revision template
+		// metadata. KPA reads it via the PA and clamps desiredScale at 1.
+		{
+			"op":    "add",
+			"path":  "/spec/template/metadata/annotations/autoscaling.knative.dev~1max-scale",
+			"value": "1",
 		},
 	}
 
@@ -308,7 +330,7 @@ func ApplyKsvcSpec(ctx context.Context, namespace, ksvcName string, selector map
 func PatchKsvcNodeSelector(ctx context.Context, namespace, ksvcName string, selector map[string]string) error {
 	// No-op when the ksvc's nodeSelector already equals the desired pool
 	// selector — a converged reconcile tick issues no write and logs nothing.
-	if _, _, curSel, found := readKsvcApplyState(ctx, namespace, ksvcName); found && selectorEqual(curSel, selector) {
+	if _, _, curSel, _, found := readKsvcApplyState(ctx, namespace, ksvcName); found && selectorEqual(curSel, selector) {
 		return nil
 	}
 
