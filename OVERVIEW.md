@@ -1055,14 +1055,18 @@ at `c_opt_warm`; the boost is below `c_min_cold` so the experiment row carries
 ### 8.4 Output — `status.online`
 
 Each reconcile writes the per-ksvc assignment set to `status.online.assignments`
-and the current cluster-wide `burstMode`. The schema below reflects the
-**implemented Go shape** (`OnlineStatus` / `OnlineAssignment`); a richer
-schema with `decidedAt`, `burstRate`, etc., is a still-open extension.
+plus the cluster-wide burst snapshot. Both the top-level `burstRate`/
+`burstDeltaRate` and the per-assignment `decidedAt`/`burstRate` are
+level-triggered: a converged tick (decision unchanged) keeps the previous
+values, so `decidedAt` records when a row *first took its current shape*
+rather than when status was last written.
 
 ```yaml
 status:
   online:
-    burstMode: NORMAL                # current detector mode (cluster-wide)
+    burstMode: NORMAL                # cluster-wide detector mode at this tick
+    burstRate: 0.42                  # smoothed events/sec (EWMA velocity)
+    burstDeltaRate: 0.05             # smoothed events/sec² (EWMA acceleration)
     activeAssignments: 3
     assignments:
       - ksvc: measure-yolo-001
@@ -1073,28 +1077,36 @@ status:
         degraded: false
         ready: true
         url: http://measure-yolo-001.serverless.svc.cluster.local/detect/local
+        decidedAt: "2026-05-28T10:42:17Z"   # preserved across unchanged ticks
+        burstRate: 0.31              # detector rate AT decidedAt (for joins)
       - ksvc: measure-yolo-002
         node: serverless
-        tier: c_min                  # NORMAL c_opt didn't fit, fell to c_min
+        tier: c_min                  # c_opt didn't fit pool-wide; fell to c_min
         startingCpu: 750m
-        runningCpu: 437m             # still c_opt_warm
+        runningCpu: 437m
         degraded: false
         ready: true
+        decidedAt: "2026-05-28T10:42:39Z"
+        burstRate: 1.20              # rate had climbed by this decision
       - ksvc: measure-yolo-003
         node: worker-1               # Tier 3 pinned to this hostname
         tier: best_fit
         startingCpu: 500m            # = worker-1's full free_n
-        runningCpu: 437m             # still c_opt_warm
+        runningCpu: 437m
         degraded: true               # cold < c_min_cold → degraded admit
         ready: true
+        decidedAt: "2026-05-28T10:42:51Z"
+        burstRate: 1.85
 ```
 
-A Pending outcome carries `degraded: true` with `tier="", node="",
-startingCpu="", runningCpu=""` — no admission, no patch.
+A Pending outcome carries `degraded: true` with empty `tier`, `node`,
+`startingCpu`, `runningCpu` — no admission, no patch — but still gets a
+`decidedAt`/`burstRate` so the experiment harness can attribute the refusal.
 
-The combination of `(ksvc, tier, startingCpu, degraded, burstMode)` is the
-join key the experiment harness uses to attribute observed request latencies
-back to the placement context. `runningCpu` is constant across rows by design.
+The join key for an experiment latency CSV is `(ksvc, decidedAt)` — `decidedAt`
+is the row's lifecycle anchor (it advances only when the decision changes,
+not on every status write). The `(burstRate, burstDeltaRate)` columns
+support the thesis chapter's burst-vs-latency plots.
 
 ---
 

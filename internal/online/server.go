@@ -98,7 +98,7 @@ func handleDecide(ctx context.Context, nw *watcher.NimbusWatcher, bs *BurstState
 
 	// Feed the burst detector: this RPC IS the cold-start event.
 	bs.OnColdStartEvent(time.Now())
-	mode, reserve, rate := bs.Read()
+	mode, reserve, rate, _ := bs.Read()
 
 	snap, err := buildPoolSnapshot(ctx, ev.Spec.Placement.NodeSelector, req.Namespace, pct)
 	if err != nil {

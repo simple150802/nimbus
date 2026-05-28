@@ -526,6 +526,20 @@ spec:
                         experiment-CSV correlation.
                       type: string
                       enum: ["NORMAL", "BURST"]
+                    burstRate:
+                      description: |
+                        Smoothed cold-start arrival rate (events/sec, EWMA
+                        velocity) at the most recent status write. Snapshot —
+                        only refreshed when something else in the status
+                        actually changes (level-trigger), so a converged tick
+                        never bumps this value.
+                      type: number
+                    burstDeltaRate:
+                      description: |
+                        Smoothed acceleration (events/sec²) at the same instant
+                        as burstRate. Justifies §5.6 early-flip behaviour with
+                        joinable data; same level-trigger semantics as burstRate.
+                      type: number
                     assignments:
                       description: |
                         One row per managed ksvc, in the order they appear in
@@ -614,3 +628,23 @@ spec:
                               row, and to pin the URL to what online
                               actually decided.
                             type: string
+                          decidedAt:
+                            description: |
+                              Wall-clock time the placement decision was made.
+                              PRESERVED across ticks when the decision tuple
+                              (tier/node/startingCpu/runningCpu/degraded) is
+                              unchanged — so it records when the row first
+                              took its current shape, not when status was last
+                              written. Drives the time-series join in the
+                              experiment harness.
+                            type: string
+                            format: date-time
+                          burstRate:
+                            description: |
+                              Smoothed cold-start arrival rate (events/sec) at
+                              decidedAt — the detector signal that drove THIS
+                              row's decision. Preserved alongside decidedAt
+                              across unchanged ticks. Top-level
+                              status.online.burstRate carries the cluster-wide
+                              current value.
+                            type: number

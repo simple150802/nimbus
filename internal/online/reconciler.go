@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -84,10 +85,22 @@ func ReconcileOne(ctx context.Context, ev *nimbusevent.NimbusEvent, claimed map[
 				ns, nimbus, err))
 		})
 	}
-	mode, reserve, _ := bs.Read()
+	mode, reserve, rate, deltaRate := bs.Read()
 	poolLabel := poolLabelValue(ev.Spec.Placement.NodeSelector)
 	warmPath := ev.Spec.DurationPolicy.WarmApiCondition.Path
 	ksvcs := ev.Selector.MatchExpressions[0].Values
+	now := metav1.NewTime(time.Now())
+
+	// prevByKsvc indexes the previous tick's assignments so we can preserve
+	// DecidedAt + per-row BurstRate when a ksvc's decision is unchanged.
+	// DecidedAt records when the row FIRST took its current shape, not when
+	// status was last written — only an actual decision change updates it.
+	prevByKsvc := map[string]nimbusevent.OnlineAssignment{}
+	if prev := last[key]; prev.online != nil {
+		for _, a := range prev.online.Assignments {
+			prevByKsvc[a.Ksvc] = a
+		}
+	}
 
 	anyWrite := false
 	// pending holds warnings (duplicate / missing / no-fit) flushed only if this
@@ -162,10 +175,25 @@ func ReconcileOne(ctx context.Context, ev *nimbusevent.NimbusEvent, claimed map[
 					ns, nimbus, ksvc, d.tier, row.Node, mode, d.cold, d.warm, d.degraded))
 			}
 		}
+
+		// DecidedAt / per-row BurstRate: preserve from the previous tick when
+		// the decision tuple (Tier/Node/StartingCpu/RunningCpu/Degraded) is
+		// unchanged; otherwise stamp the current time + current burst rate.
+		// This way DecidedAt marks when the row first took its current shape.
+		if prev, ok := prevByKsvc[ksvc]; ok &&
+			prev.Tier == row.Tier && prev.Node == row.Node &&
+			prev.StartingCpu == row.StartingCpu && prev.RunningCpu == row.RunningCpu &&
+			prev.Degraded == row.Degraded {
+			row.DecidedAt = prev.DecidedAt
+			row.BurstRate = prev.BurstRate
+		} else {
+			row.DecidedAt = now
+			row.BurstRate = rate
+		}
 		assignments = append(assignments, row)
 	}
 
-	desired := buildOnlineStatus(assignments, mode)
+	desired := buildOnlineStatus(assignments, mode, rate, deltaRate)
 	prev := last[key]
 	statusChanged := prev.skipReason != "" || !reflect.DeepEqual(prev.online, desired)
 	changed := anyWrite || statusChanged

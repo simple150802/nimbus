@@ -88,12 +88,14 @@ func NewBurstState() *BurstState {
 	return &BurstState{cfg: DefaultBurstConfig(), mode: ModeNormal}
 }
 
-// Read returns the current mode, reserve ratio, and smoothed rate. O(1) under
-// RLock — safe on every per-ksvc waterfall decision.
-func (b *BurstState) Read() (mode BurstMode, reserveRatio, rate float64) {
+// Read returns the current mode, reserve ratio, smoothed rate (velocity), and
+// smoothed acceleration. O(1) under RLock — safe on every per-ksvc waterfall
+// decision. The rate/deltaRate are also stamped onto status.online for
+// experiment-CSV correlation.
+func (b *BurstState) Read() (mode BurstMode, reserveRatio, rate, deltaRate float64) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return b.mode, b.reserveRatio, b.ewmaRate
+	return b.mode, b.reserveRatio, b.ewmaRate, b.ewmaDelta
 }
 
 // OnColdStartEvent folds one observed cold-start arrival into the EWMA rate and

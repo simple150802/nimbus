@@ -1,5 +1,9 @@
 package nimbusevent
 
+import (
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
 // ---------------------------------------------------------
 // 1. The Main Event Wrapper
 // ---------------------------------------------------------
@@ -196,6 +200,17 @@ type OnlineStatus struct {
 	// correlation; the detector itself is process-global, not per-Nimbus.
 	BurstMode string `json:"burstMode,omitempty"`
 
+	// BurstRate is the smoothed cold-start arrival rate (events/sec) at the
+	// time of the most recent status write. Snapshot, not continuous —
+	// updates only when something else in the status changes (level-trigger).
+	// Useful for joining a thesis-experiment latency CSV row to "what was the
+	// detector signal when this decision was made".
+	BurstRate float64 `json:"burstRate,omitempty"`
+
+	// BurstDeltaRate is the smoothed acceleration (events/sec²) at the same
+	// instant as BurstRate. Justifies §5.6 early-flip behaviour with data.
+	BurstDeltaRate float64 `json:"burstDeltaRate,omitempty"`
+
 	// Assignments is one row per managed ksvc, in the order they appear
 	// in spec.selector.matchExpressions[0].values. A ksvc is omitted only
 	// when it does not exist in the cluster; otherwise a row is produced
@@ -245,6 +260,18 @@ type OnlineAssignment struct {
 	// kubeapi.BuildKsvcStatusURL. Cached on status so the experiment
 	// script doesn't need a separate kubectl-get-ksvc per row.
 	URL string `json:"url,omitempty"`
+
+	// DecidedAt is the wall-clock time the placement decision was made.
+	// PRESERVED across ticks when the decision (Tier/Node/StartingCpu/
+	// RunningCpu/Degraded) is unchanged — so it records when the row first
+	// took its current shape, not when status was last written. Drives the
+	// time-series join in the experiment harness.
+	DecidedAt metav1.Time `json:"decidedAt,omitempty"`
+
+	// BurstRate is the smoothed cold-start arrival rate (events/sec) at
+	// DecidedAt — i.e. the detector signal that drove THIS row's decision.
+	// Preserved alongside DecidedAt across unchanged ticks.
+	BurstRate float64 `json:"burstRate,omitempty"`
 }
 
 // ---------------------------------------------------------
