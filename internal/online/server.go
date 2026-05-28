@@ -89,6 +89,19 @@ func handleDecide(ctx context.Context, nw *watcher.NimbusWatcher, bs *BurstState
 		writeDecide(w, decideResponse{Decision: "passthrough"})
 		return
 	}
+
+	// Per-Nimbus online opt-out: feed the burst detector (cluster-wide rate
+	// must remain accurate for OTHER online-enabled Nimbuses' waterfalls)
+	// then return passthrough — no waterfall, no patches. KPA proceeds with
+	// the existing ksvc spec offline already pre-positioned.
+	if !ev.Spec.OnlineEnabled() {
+		bs.OnColdStartEvent(time.Now())
+		logging.Info(fmt.Sprintf("[online][decide] event=passthrough ns=%s ksvc=%s reason=online_disabled",
+			req.Namespace, req.Ksvc))
+		writeDecide(w, decideResponse{Decision: "passthrough"})
+		return
+	}
+
 	_, prof := selectProfileNode(ev)
 	if prof == nil {
 		// Offline hasn't saturated a profile yet — let KPA proceed unchanged.

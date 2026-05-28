@@ -45,6 +45,7 @@ ken/
 - Per-ksvc `StartupCPUBoost` CR creation (labeled `nimbus.io/owned-by=<nimbus>`).
 - Sample export to disk (`spec.export.dir` → `results/<timestamp>/` with raw CSVs + `meta.json` + per-node `result.json`).
 - Sample preload from a previous export (`spec.preMeasured.loadFromDir`) — skips re-measurement.
+- Per-Nimbus online opt-out (`spec.online.enabled: false`) — offline still runs (profile + bootstrap apply + boost CR), polling waterfall and `/decide` short-circuit. Useful for measurement-only workflows and thesis A/B baselines.
 
 **What works partially** (in-process, runnable; the Knative-side fork is the missing piece):
 
@@ -371,9 +372,64 @@ spec:
   # Optional. Load a previously-exported run instead of measuring.
   # preMeasured:
   #   loadFromDir: "../results/2026-05-15T10-56-11"
+  # Optional. Per-Nimbus online opt-out. Default: online enabled.
+  # When false, the polling reconciler skips this Nimbus and /decide
+  # returns passthrough. Offline still measures + applies the boost CR.
+  # online:
+  #   enabled: false
 ```
 
 The authoritative field reference is the CRD schema in [config/crd.yaml](config/crd.yaml) — every field has a description block there.
+
+---
+
+## Offline-only mode
+
+A Nimbus carrying `spec.online.enabled: false` runs **offline only**: the binary search, profile persistence, and bootstrap apply (pool selector + `c_opt_warm` + `StartupCPUBoost` CR at `c_opt_cold`) all happen as usual, but the polling waterfall and `/decide` short-circuit. Useful for:
+
+- **Measurement workflows** — capture the profile to `results/<timestamp>/`, then leave the ksvc alone (no every-2-s touch).
+- **Thesis A/B baselines** — compare "measured + online-managed" vs "measured only" without forking the controller.
+- **Quiet steady state** — once the profile is stable, avoid further reconcile noise.
+
+To enable, set the flag in the manifest:
+
+```yaml
+spec:
+  online:
+    enabled: false
+```
+
+What changes when the flag is `false`:
+
+| Path | Behaviour |
+|---|---|
+| Offline (binary search, `.status.perNode`, `.status.applied`, boost CR) | **unchanged** — runs as usual |
+| Polling reconciler | **skips** this Nimbus (no `.status.online` write); logs `event=skip_offline_only` once on entry |
+| `/decide` HTTP | feeds the burst detector (cluster-wide rate must stay accurate), then returns `passthrough`; KPA proceeds with the existing spec |
+| Cold-start boost via `kube-startup-cpu-boost` | **works** — the boost CR offline wrote is still consumed by the webhook |
+| Burst detector | still observes cold-starts on this Nimbus's ksvcs (so OTHER online-enabled Nimbuses' waterfalls react correctly) |
+
+Verification:
+
+```bash
+# After applying with online.enabled=false:
+# 1. status.perNode should still be populated by offline:
+kubectl get nimbus boost-001 -n serverless -o jsonpath='{.status.perNode}' | jq
+# 2. status.applied should record what offline wrote onto each ksvc:
+kubectl get nimbus boost-001 -n serverless -o jsonpath='{.status.applied}' | jq
+# 3. status.online should be ABSENT (the polling reconciler skips):
+kubectl get nimbus boost-001 -n serverless -o jsonpath='{.status.online}'
+# → (empty)
+```
+
+If you flip an already-online-enabled Nimbus to `online.enabled: false`, the previous `.status.online` rows linger (the reconciler stops writing but doesn't clear). Manual clear:
+
+```bash
+kubectl -n serverless patch nimbus boost-001 --subresource=status --type=merge \
+  -p '{"status":{"online":null}}'
+```
+
+The default is `online.enabled: true`, so omitting the field (or omitting the whole `spec.online` block) keeps the full waterfall + `/decide` behaviour.
 
 ---
 

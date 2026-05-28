@@ -322,6 +322,48 @@ type NimbusSpec struct {
 	Measurement    MeasurementPolicy `json:"measurement,omitempty"`
 	Export         *ExportSpec       `json:"export,omitempty"`
 	PreMeasured    *PreMeasuredSpec  `json:"preMeasured,omitempty"`
+
+	// Online configures the online stage's behaviour for this Nimbus.
+	// Absent or `online.enabled: true` keeps the default (online active).
+	// `online.enabled: false` opts the Nimbus out — see OnlineSpec for the
+	// exact effect on each code path.
+	Online *OnlineSpec `json:"online,omitempty"`
+}
+
+// OnlineSpec is the per-Nimbus online-stage configuration. Today it only
+// carries the on/off switch; the nested-struct shape leaves room to add
+// per-Nimbus online tunables later (e.g. burst overrides) without another
+// CRD migration.
+type OnlineSpec struct {
+	// Enabled controls whether the online stage acts on this Nimbus.
+	// Pointer-bool so we can distinguish unset (treated as true) from
+	// explicit false. When false:
+	//   - The polling reconciler SKIPS this Nimbus (no waterfall, no
+	//     .status.online write). Offline state on .status.perNode and
+	//     .status.applied is unaffected.
+	//   - /decide returns "passthrough" for managed ksvcs (KPA proceeds
+	//     with the existing ksvc spec — already pool-wide at c_opt_warm
+	//     from offline's bootstrap apply).
+	//   - The burst detector STILL observes the cold-start (cluster-wide
+	//     rate must remain accurate so other Nimbuses' waterfalls react
+	//     correctly).
+	//
+	// Offline is untouched: the binary search, profile persistence, and
+	// per-ksvc StartupCPUBoost CR at c_opt_cold all happen regardless of
+	// this flag. So offline-only mode is fully functional for cold-start
+	// boost; what disappears is the adaptive waterfall (c_min downgrade
+	// under pressure, best_fit pin under saturation).
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
+// OnlineEnabled returns true when the online stage should act on this Nimbus.
+// Default is true (field unset or Online block absent) so existing manifests
+// keep current behaviour with no CRD migration.
+func (s NimbusSpec) OnlineEnabled() bool {
+	if s.Online == nil || s.Online.Enabled == nil {
+		return true
+	}
+	return *s.Online.Enabled
 }
 
 // PlacementSpec is the Nimbus-owned scheduling scope. For the thesis POC,

@@ -157,6 +157,25 @@ spec:
                       type: string
                       minLength: 1
                       pattern: '^[A-Za-z0-9_./-]+$'
+                online:
+                  description: |
+                    Online-stage opt-out. When online.enabled is false the
+                    polling reconciler skips this Nimbus (no .status.online
+                    written) and /decide returns "passthrough" for its ksvcs
+                    (KPA proceeds with the existing ksvc spec offline already
+                    pre-positioned — pool selector + c_opt_warm + boost CR).
+                    The burst detector STILL observes these ksvcs' cold-starts
+                    so the cluster-wide rate signal stays accurate for OTHER
+                    online-enabled Nimbuses. Offline is unaffected. Defaults
+                    to enabled.
+                  type: object
+                  properties:
+                    enabled:
+                      description: |
+                        Set false to opt out of the online stage. Default
+                        true (online active).
+                      type: boolean
+                      default: true
                 measurement:
                   description: |
                     Controls how many samples the controller averages per

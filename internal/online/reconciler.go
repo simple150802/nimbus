@@ -70,6 +70,17 @@ func ReconcileOne(ctx context.Context, ev *nimbusevent.NimbusEvent, claimed map[
 		})
 	}
 
+	// Per-Nimbus online opt-out (spec.online.enabled=false). Offline still
+	// runs (binary search, profile, bootstrap apply, boost CR); we just don't
+	// run the waterfall or write .status.online for this Nimbus. /decide
+	// handles its own short-circuit (server.go) for the same flag.
+	if !ev.Spec.OnlineEnabled() {
+		return -1, noteSkip(last, key, "online_disabled", func() {
+			logging.Info(fmt.Sprintf("[online][nimbus] event=skip_offline_only ns=%s nimbus=%s action=skip reason=spec.online.enabled=false",
+				ns, nimbus))
+		})
+	}
+
 	_, profile := selectProfileNode(ev)
 	if profile == nil {
 		return -1, noteSkip(last, key, "no_complete_profile", func() {
