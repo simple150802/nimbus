@@ -110,12 +110,14 @@ This is exactly the quantity NIMBUS optimises: more cold CPU → model loads fas
 
 ## Output columns (`results.csv`)
 
-`label, event_offset, ksvc, decided, decision, tier, boost_cpu, mode,
+`label, event_offset, ksvc, decided, decision, tier, boost_cpu, warm_cpu, mode,
 send_wallclock, latency_ms, http_code, attempts`
 
-`latency_ms` = time-to-READY (cold-start). `attempts` = readiness polls until
-ready. `send_wallclock` (epoch) joins rows against `nimbus.log` + a resource
-sampler on a common timeline.
+`latency_ms` = time-to-READY (cold-start). `boost_cpu` = cold CPU NIMBUS set on
+the StartupCPUBoost CR; `warm_cpu` = the CPU the pod reverts to (`/decide`'s `cpu`
+field — INTENDED value, not the live pod's actual reverted CPU). `attempts` =
+readiness polls until ready. `send_wallclock` (epoch) joins rows against
+`nimbus.log` + `resources.csv` (sample_resources.py) on a common timeline.
 
 ## Knobs worth knowing
 
@@ -126,10 +128,108 @@ sampler on a common timeline.
   (isolates spin-up time); `/detect/local` mixes in YOLO compute.
 - `--seed` (gen_schedule): fixed → identical schedule across configs.
 
+## Node resource monitoring (compare resource efficiency vs baselines)
+
+`sample_resources.py` snapshots the pool nodes every `--interval` seconds while a
+schedule runs — the ground-truth, config-agnostic view (it does NOT use NIMBUS's
+own snapshot, so NIMBUS and the baselines are measured identically). Run it in
+parallel with `replay.py`, once per config:
+
+```bash
+# terminal A — sampler (start just before replay, same window)
+python3 sample_resources.py --label nimbus --interval 2 --duration 320 --out res_nimbus.nodes.csv
+# terminal B — the run
+python3 replay.py --schedule sched_e1.csv --label nimbus --out res_nimbus.csv
+```
+Repeat with `--label static-low` / `static-high` (and `--no-decide` on replay) to
+get `res_low.nodes.csv` / `res_high.nodes.csv`.
+
+Columns: `label, epoch, node, alloc_m, requested_m, used_m, free_m, pods`.
+Add `--no-top` if there is no metrics-server (drops `used_m`, keeps requested).
+
+**What proves NIMBUS is more efficient** — from `requested_m` (Σ pod CPU requests
+NIMBUS/baseline reserved on the pool) over time:
+
+| Metric | How | NIMBUS should be |
+|--------|-----|------------------|
+| Peak reserved CPU | max of pool `requested_m` | ≤ static-high, at similar latency |
+| CPU-seconds | Σ(`requested_m` × interval) | lower than static-high |
+| Utilization | `used_m / requested_m` | closer to 1 (requests match need) |
+| Admission density | cold-starts served ÷ CPU-seconds | higher |
+
+The story: NIMBUS (right-sized c_opt) reserves **less CPU than static-high for the
+same cold-start latency**, and far better latency than static-low — so it sits on
+the efficiency frontier. Join `res_*.nodes.csv` (epoch) with `res_*.csv`
+(send_wallclock) to line up "resource reserved" against "cold-start served".
+
+> **Also** — NIMBUS already computes per-node free in `buildPoolSnapshot`; if you
+> want NIMBUS's own view logged per `/decide`, that's a one-line add in
+> `internal/online/budget.go`. The external sampler above is the fair cross-config
+> comparison; the internal log is only for cross-checking NIMBUS's math.
+
+## Options reference
+
+**gen_fleet.py** — emit N ksvcs (+ Nimbus CR):
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--count` | 20 | fleet size |
+| `--base-name` | loadtest-yolo | ksvc name prefix |
+| `--namespace` | serverless | namespace |
+| `--image` | measure-yolo:v1 | container image |
+| `--rtmp` | 192.168.17.129:2000 | RTMP_STREAM_URL env |
+| `--cpu` | 100m | fixed ksvc CPU (static baselines) |
+| `--no-nimbus` | off | emit only Services (true static baseline) |
+| `--nimbus-name` | loadtest-boost | Nimbus CR name |
+| `--pool-selector` | nimbus.io/pool=serverless | node pool label |
+| `--load-dir` | ./results/yolo | preloaded profile dir |
+| `--metric` / `--cold-slo` / `--warm-slo` / `--cpu-budget` | p95 / 16000 / 5000 / 1200m | must match the preloaded run |
+| `--out` | fleet.yaml | output (+ `.ksvcs` name list) |
+
+**gen_schedule.py** — arrival model → `schedule.csv`:
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--mode` | (required) | `periodic` / `poisson` / `burst` |
+| `--ksvcs-file` | — | ksvc list (from `fleet.yaml.ksvcs`) |
+| `--base-name` / `--count` | loadtest-yolo / 20 | fleet if no `--ksvcs-file` |
+| `--cooldown` | 60 | s before a ksvc is reused (≥ cold-start + scale-to-zero) |
+| `--duration` / `--rate` | 300 / 0.2 | periodic/poisson: length, events/sec |
+| `--baseline-rate` | 0.15 | burst: quiet-period rate |
+| `--wave-size` / `--wave-window` / `--wave-at` | 12 / 6 / 60 | burst: wave shape + start times |
+| `--seed` | 42 | fixed → identical schedule across configs |
+| `--out` | schedule.csv | output |
+
+**replay.py** — replay + measure:
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--schedule` | (required) | schedule.csv to replay |
+| `--namespace` | serverless | namespace |
+| `--decide-url` | http://localhost:8080/decide | NIMBUS /decide endpoint |
+| `--no-decide` | off | skip /decide (baselines/ablations) |
+| `--path` | /status | endpoint polled for cold-start |
+| `--ready-body` | READY | body token = ready (empty = any HTTP 200) |
+| `--poll-interval` | 0.1 | s between readiness polls |
+| `--settle` | 1.5 | s after /decide before request (boost-CR propagation) |
+| `--req-timeout` | 120 | max s to wait for READY |
+| `--dns-suffix` | svc.cluster.local | cluster DNS suffix |
+| `--label` | nimbus | config label in output |
+| `--out` | results.csv | output |
+
+**sample_resources.py** — node CPU sampler:
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--pool-selector` | nimbus.io/pool=serverless | nodes to sample |
+| `--interval` | 2 | s between samples |
+| `--duration` | 320 | total sampling window (s) |
+| `--no-top` | off | skip `kubectl top` (no metrics-server) |
+| `--label` | nimbus | config label in output |
+| `--out` | resources.csv | output |
+
 ## Next (not yet built)
 
-- **Resource sampler**: `kubectl top nodes/pods` → CSV every 1–2s (needs
-  metrics-server) for the "system resources" view.
 - **Filler**: a Deployment that reserves a tunable CPU on the pool nodes, to create
   the constrained-cluster state E2/E3 need.
-- **Timeline merger**: join `results.csv` + `nimbus.log` + resource CSV by time.
+- **Timeline merger**: join `results.csv` + `nimbus.log` + `resources.csv` by time.

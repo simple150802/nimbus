@@ -78,7 +78,7 @@ def poll_until_ready(url, ready_body, poll_interval, timeout):
 
 def worker(ev_offset, ksvc, args, rows, lock):
     row = {"label": args.label, "event_offset": f"{ev_offset:.3f}", "ksvc": ksvc,
-           "decided": 0, "decision": "", "tier": "", "boost_cpu": "", "mode": "",
+           "decided": 0, "decision": "", "tier": "", "boost_cpu": "", "warm_cpu": "", "mode": "",
            "send_wallclock": "", "latency_ms": "", "http_code": "", "attempts": ""}
 
     if not args.no_decide:
@@ -87,7 +87,8 @@ def worker(ev_offset, ksvc, args, rows, lock):
         if resp:
             row["decision"] = resp.get("decision", "")
             row["tier"] = resp.get("tier", "")
-            row["boost_cpu"] = resp.get("boostCpu", "")
+            row["boost_cpu"] = resp.get("boostCpu", "")  # cold — StartupCPUBoost CR
+            row["warm_cpu"] = resp.get("cpu", "")         # warm — value the pod reverts to
             row["mode"] = resp.get("mode", "")
         else:
             row["decision"] = f"decide_err:{err}"
@@ -104,7 +105,7 @@ def worker(ev_offset, ksvc, args, rows, lock):
     with lock:
         rows.append(row)
     print(f"[t+{ev_offset:6.1f}] {ksvc:20s} tier={row['tier'] or '-':9s} "
-          f"mode={row['mode'] or '-':6s} cold={row['boost_cpu'] or '-':6s} "
+          f"mode={row['mode'] or '-':6s} cold={row['boost_cpu'] or '-':6s} warm={row['warm_cpu'] or '-':6s} "
           f"ready={row['latency_ms'] or 'TIMEOUT':>8s}ms attempts={attempts} code={row['http_code']}")
 
 
@@ -151,7 +152,7 @@ def main():
 
     rows.sort(key=lambda r: float(r["event_offset"]))
     cols = ["label", "event_offset", "ksvc", "decided", "decision", "tier",
-            "boost_cpu", "mode", "send_wallclock", "latency_ms", "http_code", "attempts"]
+            "boost_cpu", "warm_cpu", "mode", "send_wallclock", "latency_ms", "http_code", "attempts"]
     with open(args.out, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=cols)
         w.writeheader()
