@@ -182,6 +182,18 @@ In production this would be a Deployment; for thesis dev it runs from a terminal
 ### Step 5 — Apply a Nimbus CR (kicks off the binary search)
 
 ```bash
+kubectl edit configmap config-features -n knative-serving
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: config-features
+  namespace: knative-serving
+data:
+  kubernetes.podspec-nodeselector: "enabled" 
+  _example: |
+    # ... tất cả nội dung cũ của _example giữ nguyên bên dưới này ...
+    # kubernetes.podspec-nodeselector: "disabled"
+# After that run this 
 kubectl apply -f config/my-boost-export.yaml
 
 # In the controller terminal, expect a sequence like:

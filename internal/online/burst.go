@@ -19,10 +19,12 @@ import (
 //   NIMBUS_BURST_RESERVE_RATIO    free-CPU fraction held back in BURST   (0.30)
 //   NIMBUS_BURST_THRESHOLD_RATE   events/sec that flips NORMAL->BURST    (1.0)
 //   NIMBUS_BURST_THRESHOLD_DELTA  acceleration that flips early          (0.15)
+//   NIMBUS_BURST_WINDOW           sliding window for the rate estimate   (10s)
 //   NIMBUS_BURST_EWMA_ALPHA       smoothing for rate (velocity)          (0.30)
 //   NIMBUS_BURST_EWMA_BETA        smoothing for rate-of-change (accel)   (0.20)
 //   NIMBUS_BURST_DECAY_INTERVAL   decay-loop tick period                 (5s)
 //   NIMBUS_BURST_DECAY_QUIET      quiet window before BURST->NORMAL      (30s)
+//   NIMBUS_BURST_DECAY_FACTOR     fade per decay tick during silence     (0.5)
 //
 // (NIMBUS_BUDGET_PCT — the per-node serverless budget — is parsed in
 // controller.go's budgetPct.)
@@ -33,23 +35,34 @@ type BurstConfig struct {
 	ReserveRatio   float64
 	ThresholdRate  float64
 	ThresholdDelta float64
+	Window         time.Duration
 	Alpha          float64
 	Beta           float64
 	DecayInterval  time.Duration
 	DecayQuiet     time.Duration
+	DecayFactor    float64 // fade multiplier per decay tick — INDEPENDENT of Alpha/Beta
 }
 
 // DefaultBurstConfig returns the §8.2 defaults with per-field env overrides.
 func DefaultBurstConfig() BurstConfig {
-	return BurstConfig{
+	cfg := BurstConfig{
 		ReserveRatio:   envFloat("NIMBUS_BURST_RESERVE_RATIO", 0.30),
 		ThresholdRate:  envFloat("NIMBUS_BURST_THRESHOLD_RATE", 1.0),
 		ThresholdDelta: envFloat("NIMBUS_BURST_THRESHOLD_DELTA", 0.15),
+		Window:         envDuration("NIMBUS_BURST_WINDOW", 10*time.Second),
 		Alpha:          envFloat("NIMBUS_BURST_EWMA_ALPHA", 0.30),
 		Beta:           envFloat("NIMBUS_BURST_EWMA_BETA", 0.20),
 		DecayInterval:  envDuration("NIMBUS_BURST_DECAY_INTERVAL", 5*time.Second),
 		DecayQuiet:     envDuration("NIMBUS_BURST_DECAY_QUIET", 30*time.Second),
+		DecayFactor:    envFloat("NIMBUS_BURST_DECAY_FACTOR", 0.5),
 	}
+	if cfg.Window <= 0 { // guard div-by-zero in the windowed-rate estimator
+		cfg.Window = 10 * time.Second
+	}
+	if cfg.DecayFactor <= 0 || cfg.DecayFactor >= 1 { // must fade, but not instantly
+		cfg.DecayFactor = 0.5
+	}
+	return cfg
 }
 
 // BurstMode is the detector's current state.
@@ -76,9 +89,10 @@ type BurstState struct {
 	mu           sync.RWMutex
 	cfg          BurstConfig
 	mode         BurstMode
-	ewmaRate     float64 // smoothed events/sec (velocity)
-	ewmaDelta    float64 // smoothed rate-of-change (acceleration)
-	reserveRatio float64 // 0 in NORMAL, cfg.ReserveRatio in BURST
+	events       []time.Time // cold-start arrivals within the last cfg.Window
+	ewmaRate     float64     // smoothed events/sec (velocity)
+	ewmaDelta    float64     // smoothed rate-of-change (acceleration)
+	reserveRatio float64     // 0 in NORMAL, cfg.ReserveRatio in BURST
 	lastEventAt  time.Time
 	seeded       bool
 }
@@ -99,24 +113,32 @@ func (b *BurstState) Read() (mode BurstMode, reserveRatio, rate, deltaRate float
 }
 
 // OnColdStartEvent folds one observed cold-start arrival into the EWMA rate and
-// acceleration, flipping NORMAL->BURST when either crosses its threshold. The
-// first event only seeds lastEventAt (an inter-arrival needs two events).
+// acceleration, flipping NORMAL->BURST when either crosses its threshold.
 // Called from the /decide handler.
+//
+// The instantaneous rate is a SLIDING-WINDOW COUNT — cold-starts seen in the
+// last cfg.Window seconds ÷ window — not 1/inter-arrival. A single-sample 1/dt
+// estimator overestimates the true arrival rate (Jensen: E[1/Δt] ≥ 1/E[Δt])
+// and blows up for near-simultaneous events (dt→0), so one coincidental close
+// pair could trip BURST. The windowed count is unbiased in events/sec and
+// bounded, so the ThresholdRate keeps a clean "events/sec" meaning.
 func (b *BurstState) OnColdStartEvent(now time.Time) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if !b.seeded {
-		b.seeded = true
-		b.lastEventAt = now
-		return
-	}
-	dt := now.Sub(b.lastEventAt).Seconds()
+	b.seeded = true
 	b.lastEventAt = now
-	if dt <= 0 {
-		dt = 1e-3
+
+	// Append this arrival and drop everything older than the window.
+	b.events = append(b.events, now)
+	cutoff := now.Add(-b.cfg.Window)
+	drop := 0
+	for drop < len(b.events) && b.events[drop].Before(cutoff) {
+		drop++
 	}
-	inst := 1.0 / dt
+	b.events = b.events[drop:]
+	inst := float64(len(b.events)) / b.cfg.Window.Seconds()
+
 	prev := b.ewmaRate
 	b.ewmaRate = b.cfg.Alpha*inst + (1-b.cfg.Alpha)*b.ewmaRate
 	b.ewmaDelta = b.cfg.Beta*(b.ewmaRate-prev) + (1-b.cfg.Beta)*b.ewmaDelta
@@ -141,8 +163,10 @@ func (b *BurstState) decay(now time.Time) {
 	}
 	quiet := now.Sub(b.lastEventAt)
 	if quiet >= b.cfg.DecayInterval {
-		b.ewmaRate *= (1 - b.cfg.Alpha)
-		b.ewmaDelta *= (1 - b.cfg.Beta)
+		// Fade toward zero using a DEDICATED factor, not (1-Alpha)/(1-Beta), so
+		// responsiveness (Alpha/Beta) and forget-speed (DecayFactor) tune apart.
+		b.ewmaRate *= b.cfg.DecayFactor
+		b.ewmaDelta *= b.cfg.DecayFactor
 	}
 	if b.mode == ModeBurst && quiet >= b.cfg.DecayQuiet && b.ewmaRate < b.cfg.ThresholdRate {
 		b.mode = ModeNormal

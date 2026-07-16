@@ -372,12 +372,33 @@ func binarySearchForStartingPhase(ctx context.Context, current *nimbusevent.Nimb
 	// sorted curve.
 	nr := current.PerNodeResults[node]
 	sortSamplesByCpu(nr.ColdRtSamples)
-	nr.CMinStarting = deriveMin(nr.ColdRtSamples, current.Spec.Metric, sloCold)
+	// Dedicated downward search for the true cold c_min. It first tries to bracket
+	// the SLO crossing from the c_opt samples already probed — in the common
+	// tight-SLO case that needs ZERO new cold starts (degrades to deriveMin for
+	// free). Only when the crossing lies below the c_opt-probed region does it
+	// bisect [50m, lowest_probed], with k=20 capped samples + early-exit so
+	// failing points cost ~2 cold starts. See searchCMinCold for the cost model.
+	cMin, err := searchCMinCold(ctx, current, node, sloCold)
+	if err != nil {
+		return "", err
+	}
+	nr.CMinStarting = cMin
+	sortSamplesByCpu(nr.ColdRtSamples) // re-sort: searchCMinCold may have appended low-CPU points
 	if sloCold > 0 && nr.CMinStarting == "" {
 		logging.Warning(fmt.Sprintf(
 			"node=%s cold phase: no probed CPU met SLO=%dms — c_min_cold left empty",
 			node, sloCold,
 		))
+	}
+
+	// Clamp c_opt up to c_min when the knee landed below the SLO floor.
+	if raised, changed := clampOptToMin(nr.StartingCpu, nr.CMinStarting); changed {
+		logging.Warning(fmt.Sprintf(
+			"[%s] node=%s c_opt=%s was BELOW c_min=%s (knee under SLO floor) — raising c_opt to c_min",
+			phaseCold, node, nr.StartingCpu, nr.CMinStarting))
+		nr.StartingCpu = raised
+		nr.StartingRt = rtStatsFromSample(latestSampleAt(nr.ColdRtSamples, raised))
+		cOpt = raised
 	}
 
 	logging.Info(formatPhaseSummary(
@@ -390,6 +411,30 @@ func binarySearchForStartingPhase(ctx context.Context, current *nimbusevent.Nimb
 	return cOpt, nil
 }
 
+// clampOptToMin raises optCpu up to minCpu when the binary-search knee landed
+// below the SLO-meeting floor (c_opt < c_min). This happens when the RT curve
+// declines gradually enough that every adjacent probe improves by less than the
+// responseTimeImprovementGate, so the knee detector stops early at a CPU that
+// still violates the SLO. Because c_opt is the boost/operating target, it must
+// never sit below c_min — otherwise the operating point fails the SLO, and the
+// online waterfall's Tier 1 (c_opt) would be both cheaper AND worse than Tier 2
+// (c_min), inverting the tier hierarchy. Returns the (possibly raised) CPU and
+// whether a change was made. No-op when either input is empty or unparseable.
+func clampOptToMin(optCpu, minCpu string) (string, bool) {
+	if optCpu == "" || minCpu == "" {
+		return optCpu, false
+	}
+	oq, err1 := resource.ParseQuantity(optCpu)
+	mq, err2 := resource.ParseQuantity(minCpu)
+	if err1 != nil || err2 != nil {
+		return optCpu, false
+	}
+	if oq.MilliValue() < mq.MilliValue() {
+		return minCpu, true
+	}
+	return optCpu, false
+}
+
 func binarySearchForRunningPhase(ctx context.Context, current *nimbusevent.NimbusEvent, node string) (string, error) {
 	cpuBudget := current.Spec.ResourcePolicy.ContainerPolicies[0].CpuBudget
 
@@ -398,8 +443,17 @@ func binarySearchForRunningPhase(ctx context.Context, current *nimbusevent.Nimbu
 		sloWarm = current.Spec.AcceptableResponseTime.Warm
 	}
 
+	// cpuCold = c_opt_cold already found by the cold phase: the cheapest CPU
+	// at which the pod initialises within the cold-start RT plateau. Using it
+	// here (instead of cpuBudget) means the pod warms up at its natural optimal
+	// speed rather than at the ceiling, which is more representative and avoids
+	// overshooting the cgroup during the init window.
+	cpuCold := current.PerNodeResults[node].StartingCpu
+	if cpuCold == "" {
+		cpuCold = cpuBudget // fallback if cold phase hasn't saturated yet
+	}
 	probe := func(ctx context.Context, ev *nimbusevent.NimbusEvent, cpu string) (ProbeStats, error) {
-		return getResptWarm(ctx, ev, cpu, cpuBudget, makeSampleSink(ev, node, "warm", cpu))
+		return getResptWarm(ctx, ev, cpu, cpuCold, makeSampleSink(ev, node, "warm", cpu))
 	}
 	setOpt := func(cpu string) {
 		nr := current.PerNodeResults[node]
@@ -426,12 +480,31 @@ func binarySearchForRunningPhase(ctx context.Context, current *nimbusevent.Nimbu
 
 	nr := current.PerNodeResults[node]
 	sortSamplesByCpu(nr.WarmRtSamples)
-	nr.CMinRunning = deriveMin(nr.WarmRtSamples, current.Spec.Metric, sloWarm)
+	// Dedicated downward search for the true c_min over [floor, cpuBudget].
+	// Uses one warm pod resized in-place per candidate, with a hard per-request
+	// deadline (2×SLO) so an unusably-slow low-CPU point is detected as
+	// "fails SLO" in seconds instead of hanging on the 90s retry loop.
+	cMin, err := searchCMinWarm(ctx, current, node, cpuCold, sloWarm)
+	if err != nil {
+		return "", err
+	}
+	nr.CMinRunning = cMin
+	sortSamplesByCpu(nr.WarmRtSamples) // re-sort: searchCMinWarm may have appended low-CPU points
 	if sloWarm > 0 && nr.CMinRunning == "" {
 		logging.Warning(fmt.Sprintf(
 			"node=%s warm phase: no probed CPU met SLO=%dms — c_min_warm left empty",
 			node, sloWarm,
 		))
+	}
+
+	// Clamp c_opt up to c_min when the knee landed below the SLO floor.
+	if raised, changed := clampOptToMin(nr.RunningCpu, nr.CMinRunning); changed {
+		logging.Warning(fmt.Sprintf(
+			"[%s] node=%s c_opt=%s was BELOW c_min=%s (knee under SLO floor) — raising c_opt to c_min",
+			phaseWarm, node, nr.RunningCpu, nr.CMinRunning))
+		nr.RunningCpu = raised
+		nr.RunningRt = rtStatsFromSample(latestSampleAt(nr.WarmRtSamples, raised))
+		cOpt = raised
 	}
 
 	logging.Info(formatPhaseSummary(

@@ -461,3 +461,65 @@ func DeleteKsvcPods(ctx context.Context, namespace, labelSelector string) ([]str
 	}
 	return deleted, nil
 }
+
+// PatchPodCpu directly patches the running pod's CPU limits and requests to
+// cpuValue via in-place pod vertical scaling (InPlacePodVerticalScaling,
+// enabled by kube-startup-cpu-boost being installed). Unlike PatchResourceLimits
+// which patches the ksvc spec and triggers a new Knative revision (causing
+// scale-to-zero), this patches the already-running pod — the pod stays up and
+// the cgroup is updated by the kubelet within a few seconds.
+//
+// Used by the warm probe after the pod has initialised at the cold-start CPU:
+// the ksvc is temporarily set to cpuCold for fast pod init, then this function
+// resizes the running pod to cpuValue for steady-state measurement without
+// any scale-to-zero cycle.
+func PatchPodCpu(ctx context.Context, namespace, labelSelector, cpuValue string) error {
+	pods, err := CLIENTSET.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	if err != nil {
+		return fmt.Errorf("list pods: %w", err)
+	}
+	if len(pods.Items) == 0 {
+		return fmt.Errorf("no pods found for selector %q in namespace %q", labelSelector, namespace)
+	}
+
+	pod := &pods.Items[0]
+	containerIdx := -1
+	for i, c := range pod.Spec.Containers {
+		if c.Name == "user-container" {
+			containerIdx = i
+			break
+		}
+	}
+	if containerIdx < 0 {
+		return fmt.Errorf("user-container not found in pod %s", pod.Name)
+	}
+
+	patchPayload := []map[string]interface{}{
+		{
+			"op":    "replace",
+			"path":  fmt.Sprintf("/spec/containers/%d/resources/limits/cpu", containerIdx),
+			"value": cpuValue,
+		},
+		{
+			"op":    "replace",
+			"path":  fmt.Sprintf("/spec/containers/%d/resources/requests/cpu", containerIdx),
+			"value": cpuValue,
+		},
+	}
+	payloadBytes, err := json.Marshal(patchPayload)
+	if err != nil {
+		return err
+	}
+
+	logging.Info(fmt.Sprintf("[set] pod cpu (in-place resize) -> ns=%s pod=%s cpu=%s", namespace, pod.Name, cpuValue))
+	// InPlacePodVerticalScaling requires the "resize" subresource, not a
+	// direct spec patch. Without it the API server rejects the request with
+	// "Forbidden: pod updates may not change fields other than ...".
+	_, err = CLIENTSET.CoreV1().Pods(namespace).Patch(
+		ctx, pod.Name, types.JSONPatchType, payloadBytes, metav1.PatchOptions{},
+		"resize",
+	)
+	return err
+}

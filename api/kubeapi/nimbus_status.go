@@ -31,6 +31,18 @@ func WriteNimbusStatus(ctx context.Context, namespace, name string, perNode map[
 			"startingCpu": r.StartingCpu,
 			"runningCpu":  r.RunningCpu,
 		}
+		if r.CMinStarting != "" {
+			entry["cMinStarting"] = r.CMinStarting
+		}
+		if r.CMinRunning != "" {
+			entry["cMinRunning"] = r.CMinRunning
+		}
+		if r.StartingRt != nil {
+			entry["startingRt"] = r.StartingRt
+		}
+		if r.RunningRt != nil {
+			entry["runningRt"] = r.RunningRt
+		}
 		// Only include sample arrays when populated — keeps partial-progress
 		// patches small and lets the CRD's omitempty stay meaningful.
 		if len(r.ColdRtSamples) > 0 {

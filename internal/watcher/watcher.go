@@ -53,10 +53,14 @@ func (nw *NimbusWatcher) StartWatcher(ctx context.Context) {
 			case watch.Added:
 				nw.Enqueue(&payload)
 			case watch.Modified:
-				// Modified flips the Nimbus back to "needs reconcile":
-				// drops it from completed, replaces in-queue fields, or
-				// appends if absent. See NimbusWatcher.Upsert.
-				nw.Upsert(&payload)
+				// Only a real spec change (generation bump) flips the Nimbus
+				// back to "needs reconcile". Skip status-only Modified events —
+				// they are NIMBUS's own .status.perNode/.status.online writes,
+				// and re-Upserting on them drops the Nimbus from completed +
+				// nils PerNodeResults, making /decide passthrough intermittently.
+				if nw.specChanged(&payload) {
+					nw.Upsert(&payload)
+				}
 			case watch.Deleted:
 				nw.Dequeue(&payload)
 			}
@@ -144,10 +148,23 @@ func (nw *NimbusWatcher) RunWorker(ctx context.Context) {
 		// fast path fires from a preMeasured-only source.
 		preMeasuredContributed := applyPreMeasured(current)
 
+		// Collapse profile results into a single ksvc-wide CPU limit for apply.
+		// In the node-pool-only POC this is normally one representative entry.
+		// CAPTURED BEFORE any WriteNimbusStatus call: patching the status
+		// subresource emits a watch.Modified event for this same Nimbus, which
+		// StartWatcher feeds into Upsert — and Upsert nils current.PerNodeResults
+		// (it treats every Modified as a possible spec change needing re-discovery).
+		// That nil-out races the apply loop below; reading MaxRunningCpu after the
+		// status write would then yield "" and the apply would patch an empty CPU.
+		// Computing into locals here makes the apply immune to that async reset.
+		var startingMax, runningMax string
+
 		if current.AllSaturated {
 			logging.Info(fmt.Sprintf("Skipping binary search — all %d candidate node(s) saturated: %s/%s",
 				len(current.CandidateNodes),
 				current.Metadata.Namespace, current.Metadata.Name))
+			startingMax = kubeapi.MaxStartingCpu(current.PerNodeResults)
+			runningMax = kubeapi.MaxRunningCpu(current.PerNodeResults)
 			// When preMeasured was the source of saturation (status was
 			// empty or partial before the overlay), persist what NIMBUS is
 			// about to apply so `kubectl get nimbus -o yaml` reflects it.
@@ -173,6 +190,11 @@ func (nw *NimbusWatcher) RunWorker(ctx context.Context) {
 			// reflects the representative profile outcome.
 			recomputeAllSaturated(current)
 
+			// Capture the apply CPU values before the status write triggers the
+			// Upsert nil-out race described above.
+			startingMax = kubeapi.MaxStartingCpu(current.PerNodeResults)
+			runningMax = kubeapi.MaxRunningCpu(current.PerNodeResults)
+
 			// Persist the representative profile so the next Added event takes the
 			// fast path above. Persisted even on partial completion so progress
 			// is not lost across reconciles.
@@ -182,11 +204,6 @@ func (nw *NimbusWatcher) RunWorker(ctx context.Context) {
 				logging.Failure("Failed to persist Nimbus status:", err)
 			}
 		}
-
-		// Collapse profile results into a single ksvc-wide CPU limit for apply.
-		// In the node-pool-only POC this is normally one representative entry.
-		startingMax := kubeapi.MaxStartingCpu(current.PerNodeResults)
-		runningMax := kubeapi.MaxRunningCpu(current.PerNodeResults)
 
 		// applied collects one row per ksvc in values[]: the selector and
 		// CPU pair NIMBUS attempted to write, plus the first error (if any).

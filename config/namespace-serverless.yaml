@@ -1,0 +1,34 @@
+# Namespace + LimitRange for the serverless workload pool.
+#
+# Apply once before any ksvc or Nimbus CR:
+#   kubectl apply -f config/namespace-serverless.yaml
+#
+# LimitRange purpose:
+#   NIMBUS only patches CPU (requests == limits) and never touches memory.
+#   Without a memory default every pod in this namespace is Burstable QoS
+#   and can be OOM-killed under node memory pressure, disrupting cold-start
+#   measurements. The LimitRange injects a generous memory default so every
+#   container that omits memory fields gets request == limit automatically —
+#   combined with NIMBUS's CPU request == limit this yields Guaranteed QoS
+#   and the OOM killer leaves these pods alone during experiments.
+#
+#   Set `default` / `defaultRequest` to a value larger than your workload's
+#   peak RSS. For a YOLOv5-family model running inference on 640x640 frames,
+#   2Gi covers small/medium variants; use 4Gi for large/xlarge.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: serverless
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: memory-default
+  namespace: serverless
+spec:
+  limits:
+  - type: Container
+    default:
+      memory: "4Gi"
+    defaultRequest:
+      memory: "4Gi"

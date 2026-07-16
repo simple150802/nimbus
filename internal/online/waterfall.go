@@ -2,13 +2,42 @@ package online
 
 import (
 	"fmt"
+	"os"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 
 	"k8s.io/apimachinery/pkg/api/resource"
 
+	"nimbus/api/logging"
 	"nimbus/api/nimbusevent"
 )
+
+// sidecarOverhead is the CPU (millicores) a Knative pod requests ON TOP of the
+// user container — chiefly the queue-proxy sidecar (cluster default 25m). The
+// waterfall's fit tests compare node headroom against the boost CPU (the user
+// container), so without this term NIMBUS under-estimates the pod's real
+// footprint and can admit a tier kube-scheduler then can't fit. Read once
+// (after config/burst.env is loaded) from NIMBUS_SIDECAR_OVERHEAD_MILLI.
+var (
+	overheadOnce  sync.Once
+	overheadMilli int64
+)
+
+func sidecarOverhead() int64 {
+	overheadOnce.Do(func() {
+		overheadMilli = 25 // queue-proxy default CPU request
+		if v := os.Getenv("NIMBUS_SIDECAR_OVERHEAD_MILLI"); v != "" {
+			if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
+				overheadMilli = n
+			} else {
+				logging.Warning(fmt.Sprintf("[online] invalid NIMBUS_SIDECAR_OVERHEAD_MILLI=%q — using default 25", v))
+			}
+		}
+	})
+	return overheadMilli
+}
 
 // decision is the waterfall outcome for one ksvc. The thesis scope is
 // cold-start optimization only: the steady-state (warm) side is locked to
@@ -55,8 +84,14 @@ func decideTier(prof *nodeProfile, snap *poolSnapshot, mode BurstMode, reserve f
 	minCold, minColdOK := milliCPU(prof.MinStarting)
 	warm := prof.OptRunning // locked across all tiers (thesis: cold-only optimization)
 
+	// The pod requests the boost CPU PLUS the queue-proxy sidecar, so every fit
+	// test adds the sidecar overhead — otherwise NIMBUS admits a tier the
+	// scheduler can't fit (it counts all containers). Computed once per call.
+	oh := sidecarOverhead()
+	maxUsable := snap.poolMaxUsable(reserve, burst)
+
 	// Tier 1 — c_opt pool-wide.
-	if optColdOK && snap.poolMaxUsable(reserve, burst) >= optCold {
+	if optColdOK && maxUsable >= optCold+oh {
 		return decision{tier: nimbusevent.TierCOpt, cold: prof.OptStarting, warm: warm, admitted: true}
 	}
 
@@ -67,19 +102,20 @@ func decideTier(prof *nodeProfile, snap *poolSnapshot, mode BurstMode, reserve f
 		if optWarm > tier2Req {
 			tier2Req = optWarm
 		}
-		if snap.poolMaxUsable(reserve, burst) >= tier2Req {
+		if maxUsable >= tier2Req+oh {
 			return decision{tier: nimbusevent.TierCMin, cold: prof.MinStarting, warm: warm, admitted: true}
 		}
 	}
 
 	// Tier 3 — best-fit pinned. Pick the node with the most raw free CPU
 	// (most headroom margin against §8.2 capacity-snapshot drift). Cold value
-	// is that node's full free_n. Floor is c_opt_warm so the warm-side request
-	// is guaranteed to fit the chosen host post-revert.
+	// is the node's free_n MINUS the sidecar overhead (so pod request = cold +
+	// overhead fits free_n). Floor is c_opt_warm so the warm-side request is
+	// guaranteed to fit the chosen host post-revert.
 	if optWarmOK {
 		var best *nodeFree
 		for _, n := range snap.nodes {
-			if n.free < optWarm {
+			if n.free < optWarm+oh {
 				continue
 			}
 			if best == nil || n.free > best.free {
@@ -89,7 +125,7 @@ func decideTier(prof *nodeProfile, snap *poolSnapshot, mode BurstMode, reserve f
 		if best != nil {
 			return decision{
 				tier:     nimbusevent.TierBestFit,
-				cold:     formatMilli(best.free),
+				cold:     formatMilli(best.free - oh),
 				warm:     warm,
 				node:     best.name,
 				admitted: true,
@@ -98,7 +134,7 @@ func decideTier(prof *nodeProfile, snap *poolSnapshot, mode BurstMode, reserve f
 		}
 	}
 
-	return decision{admitted: false} // Pending — no node has free_n ≥ c_opt_warm
+	return decision{admitted: false} // Pending — no node fits c_opt_warm + overhead
 }
 
 // deductCold subtracts an admitted decision's COLD CPU from the snapshot so

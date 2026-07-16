@@ -1,0 +1,307 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: loadtest-yolo-001
+  namespace: serverless
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/window: "10s"
+        autoscaling.knative.dev/min-scale: "0"
+        autoscaling.knative.dev/max-scale: "1"
+    spec:
+      containerConcurrency: 1
+      containers:
+        - image: docker.io/lazyken/measure-yolo:v1
+          resources:
+            requests:
+              cpu: "100m"
+            limits:
+              cpu: "100m"
+          ports:
+            - containerPort: 8080
+          env:
+            - name: RTMP_STREAM_URL
+              value: '192.168.17.129:2000'
+---
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: loadtest-yolo-002
+  namespace: serverless
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/window: "10s"
+        autoscaling.knative.dev/min-scale: "0"
+        autoscaling.knative.dev/max-scale: "1"
+    spec:
+      containerConcurrency: 1
+      containers:
+        - image: docker.io/lazyken/measure-yolo:v1
+          resources:
+            requests:
+              cpu: "100m"
+            limits:
+              cpu: "100m"
+          ports:
+            - containerPort: 8080
+          env:
+            - name: RTMP_STREAM_URL
+              value: '192.168.17.129:2000'
+---
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: loadtest-yolo-003
+  namespace: serverless
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/window: "10s"
+        autoscaling.knative.dev/min-scale: "0"
+        autoscaling.knative.dev/max-scale: "1"
+    spec:
+      containerConcurrency: 1
+      containers:
+        - image: docker.io/lazyken/measure-yolo:v1
+          resources:
+            requests:
+              cpu: "100m"
+            limits:
+              cpu: "100m"
+          ports:
+            - containerPort: 8080
+          env:
+            - name: RTMP_STREAM_URL
+              value: '192.168.17.129:2000'
+---
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: loadtest-yolo-004
+  namespace: serverless
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/window: "10s"
+        autoscaling.knative.dev/min-scale: "0"
+        autoscaling.knative.dev/max-scale: "1"
+    spec:
+      containerConcurrency: 1
+      containers:
+        - image: docker.io/lazyken/measure-yolo:v1
+          resources:
+            requests:
+              cpu: "100m"
+            limits:
+              cpu: "100m"
+          ports:
+            - containerPort: 8080
+          env:
+            - name: RTMP_STREAM_URL
+              value: '192.168.17.129:2000'
+---
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: loadtest-yolo-005
+  namespace: serverless
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/window: "10s"
+        autoscaling.knative.dev/min-scale: "0"
+        autoscaling.knative.dev/max-scale: "1"
+    spec:
+      containerConcurrency: 1
+      containers:
+        - image: docker.io/lazyken/measure-yolo:v1
+          resources:
+            requests:
+              cpu: "100m"
+            limits:
+              cpu: "100m"
+          ports:
+            - containerPort: 8080
+          env:
+            - name: RTMP_STREAM_URL
+              value: '192.168.17.129:2000'
+---
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: loadtest-yolo-006
+  namespace: serverless
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/window: "10s"
+        autoscaling.knative.dev/min-scale: "0"
+        autoscaling.knative.dev/max-scale: "1"
+    spec:
+      containerConcurrency: 1
+      containers:
+        - image: docker.io/lazyken/measure-yolo:v1
+          resources:
+            requests:
+              cpu: "100m"
+            limits:
+              cpu: "100m"
+          ports:
+            - containerPort: 8080
+          env:
+            - name: RTMP_STREAM_URL
+              value: '192.168.17.129:2000'
+---
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: loadtest-yolo-007
+  namespace: serverless
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/window: "10s"
+        autoscaling.knative.dev/min-scale: "0"
+        autoscaling.knative.dev/max-scale: "1"
+    spec:
+      containerConcurrency: 1
+      containers:
+        - image: docker.io/lazyken/measure-yolo:v1
+          resources:
+            requests:
+              cpu: "100m"
+            limits:
+              cpu: "100m"
+          ports:
+            - containerPort: 8080
+          env:
+            - name: RTMP_STREAM_URL
+              value: '192.168.17.129:2000'
+---
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: loadtest-yolo-008
+  namespace: serverless
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/window: "10s"
+        autoscaling.knative.dev/min-scale: "0"
+        autoscaling.knative.dev/max-scale: "1"
+    spec:
+      containerConcurrency: 1
+      containers:
+        - image: docker.io/lazyken/measure-yolo:v1
+          resources:
+            requests:
+              cpu: "100m"
+            limits:
+              cpu: "100m"
+          ports:
+            - containerPort: 8080
+          env:
+            - name: RTMP_STREAM_URL
+              value: '192.168.17.129:2000'
+---
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: loadtest-yolo-009
+  namespace: serverless
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/window: "10s"
+        autoscaling.knative.dev/min-scale: "0"
+        autoscaling.knative.dev/max-scale: "1"
+    spec:
+      containerConcurrency: 1
+      containers:
+        - image: docker.io/lazyken/measure-yolo:v1
+          resources:
+            requests:
+              cpu: "100m"
+            limits:
+              cpu: "100m"
+          ports:
+            - containerPort: 8080
+          env:
+            - name: RTMP_STREAM_URL
+              value: '192.168.17.129:2000'
+---
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: loadtest-yolo-010
+  namespace: serverless
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/window: "10s"
+        autoscaling.knative.dev/min-scale: "0"
+        autoscaling.knative.dev/max-scale: "1"
+    spec:
+      containerConcurrency: 1
+      containers:
+        - image: docker.io/lazyken/measure-yolo:v1
+          resources:
+            requests:
+              cpu: "100m"
+            limits:
+              cpu: "100m"
+          ports:
+            - containerPort: 8080
+          env:
+            - name: RTMP_STREAM_URL
+              value: '192.168.17.129:2000'
+---
+apiVersion: lazyken.io/v1alpha1
+kind: Nimbus
+metadata:
+  name: loadtest-boost
+  namespace: serverless
+selector:
+  matchExpressions:
+  - key: serving.knative.dev/service
+    operator: In
+    values: ["loadtest-yolo-001", "loadtest-yolo-002", "loadtest-yolo-003", "loadtest-yolo-004", "loadtest-yolo-005", "loadtest-yolo-006", "loadtest-yolo-007", "loadtest-yolo-008", "loadtest-yolo-009", "loadtest-yolo-010"]
+spec:
+  placement:
+    nodeSelector:
+      nimbus.io/pool: serverless
+  metric: p95
+  acceptableResponseTime:
+    cold: 16000
+    warm: 5000
+  preMeasured:
+    loadFromDir: "./results/yolo"
+  online:
+    enabled: true          # ON — so /decide runs the waterfall for the fleet
+  measurement:
+    coldSamples: 20
+    warmSamples: 20
+  resourcePolicy:
+    containerPolicies:
+    - containerName: user-container
+      cpuBudget: "1200m"
+  durationPolicy:
+    coldApiCondition:
+      path: "/status"
+      response: "READY"
+    warmApiCondition:
+      path: "/detect/local"
+      statusCode: 200
+      bodyContains: "\"success\":true"

@@ -1,0 +1,94 @@
+# Nimbus that runs the binary search and exports per-probe samples to disk.
+# Use this manifest the FIRST time you measure a workload — the controller
+# performs the full cold + warm search for each candidate node and writes
+# results to <export.dir>/<run-start-timestamp>/.
+#
+# Apply:
+#   kubectl apply -f config/my-boost-export.yaml
+#
+# To re-use the resulting data instead of re-measuring on a subsequent
+# apply, switch to config/my-boost-preload.yaml and point its
+# preMeasured.loadFromDir at the timestamp directory this run produced.
+apiVersion: lazyken.io/v1alpha1
+kind: Nimbus
+metadata:
+  name: boost-004
+  namespace: serverless
+selector:
+  matchExpressions:
+  - key: serving.knative.dev/service
+    operator: In
+    values: ["io-probe-001", "io-probe-002", "io-probe-003", "io-probe-004", "io-probe-005"]
+spec:
+  # Required. Declares the Nimbus-owned node pool. Offline picks one
+  # representative match (Ready+schedulable, sorted by name, take [0])
+  # and treats its profile as the pool's. At apply time the same
+  # selector is written verbatim onto every ksvc in selector.values[],
+  # replacing any user-set nodeSelector — one Nimbus, one pool.
+  # Pool nodes must be pre-labeled, e.g.:
+  #   kubectl label node worker-1 nimbus.io/pool=serverless
+  placement:
+    nodeSelector:
+      nimbus.io/pool: serverless
+
+  # Optional: RT metric the binary search converges against. Default p95.
+  # All three percentiles are recorded per probe regardless; this only
+  # selects which one drives the 10% improvement gate.
+  metric: p95
+
+  # Optional: latency budgets in milliseconds, consumed exclusively by the
+  # online stage (Phase 2 derives per-node c_min from these + the sample
+  # list). The offline binary search ignores this field. cold is required
+  # when the object is present; warm is optional.
+  acceptableResponseTime:
+    cold: 2000
+    warm: 500
+
+  # Write per-probe raw TTFB CSVs + meta.json + per-node result.json under
+  # <dir>/<run-start-timestamp>/. Path is relative to the controller's
+  # working directory.
+  export:
+    dir: "./results"
+
+  # Optional: per-Nimbus online-stage opt-out.
+  #   online.enabled: true   → online stage active for this Nimbus
+  #                            (waterfall picks tier per cold-start, polling
+  #                             reconciler maintains .status.online).
+  #   online.enabled: false  → /decide returns "passthrough" for this Nimbus's
+  #                            ksvcs, polling reconciler skips it. KPA's hook
+  #                            then proceeds with the upstream replicas-only
+  #                            patch; the ksvc still has whatever offline
+  #                            wrote (pool selector + c_opt_warm + boost CR
+  #                            at c_opt_cold) — so cold-start still benefits
+  #                            from offline measurement, just without
+  #                            adaptive tier downgrade / hostname pinning.
+  # Absent / commented = default true (online active). Uncomment to opt out.
+  online:
+    enabled: false
+
+  # Cold samples are expensive (each forces a scale-to-zero before a fresh
+  # cold start). Omit `measurement` entirely to accept the CRD defaults
+  # (1 cold sample, 10 warm samples).
+  measurement:
+    coldSamples: 20
+    warmSamples: 20
+  resourcePolicy:
+    containerPolicies:
+    - containerName: user-container
+      # Economic ceiling — NIMBUS bisects downward from this value to
+      # discover c_opt and c_min. The operator does not supply a lower
+      # bound; the algorithm's resolution threshold (100m) and safety
+      # floor (50m) terminate the search.
+      cpuBudget: "200m"
+  durationPolicy:
+    # Cold gate — also written into the per-ksvc StartupCPUBoost CR so
+    # the upstream kube-startup-cpu-boost webhook polls the same URL.
+    coldApiCondition:
+      path: "/status"
+      response: "READY"
+    # Warm gate — must hit a real workload endpoint so the binary search
+    # measures CPU-sensitive inference time, not /status flag-read.
+    warmApiCondition:
+      path: "/detect/local"
+      statusCode: 200
+      bodyContains: "\"success\":true"

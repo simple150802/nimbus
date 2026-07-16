@@ -17,15 +17,30 @@ import (
 // retries until the parent context's deadline fires.
 const httpProbeTimeout = 5 * time.Second
 
-// warmProbeTimeout is the per-request timeout for the warm-phase HTTP
-// probe (triggerHttpWithCodeBody). Warm-phase gates hit a real workload
-// endpoint (e.g. /detect/local on the YOLO probe app) whose per-request
-// latency at the search-floor CPU can be 20–40 s. The 5 s cold ceiling
-// is far too tight: NIMBUS times out client-side before inference
-// finishes, gunicorn keeps processing (logs 200), queue-proxy logs
-// "context canceled" — and NIMBUS retries forever without ever getting
-// a response. 90 s gives ~2× safety margin over realistic worst cases.
+// warmProbeTimeout is the FLOOR for the warm-phase per-request HTTP timeout.
+// Warm gates hit a real workload endpoint whose per-request latency at low CPU
+// can be tens of seconds. 90 s is fine for image/inference workloads, but
+// minute-scale workloads (e.g. LLM token generation: ~60 s at budget, ~120 s at
+// half budget) blow past it — the client times out before the response arrives
+// and triggerHttpWithCodeBody's retry loop spins forever. warmRequestTimeout
+// scales the actual per-request timeout to the warm SLO; this const is only the
+// lower bound when no SLO is set.
 const warmProbeTimeout = 90 * time.Second
+
+// warmRequestTimeout returns the per-request HTTP client timeout for warm
+// probes, scaled to the warm SLO: max(warmProbeTimeout, 2×SLO). A request that
+// could plausibly meet the SLO always has room to complete (so the curve is
+// measured, not timed out), while genuinely stuck pods are still bounded. A
+// non-positive sloMillis (no warm SLO configured) falls back to the floor.
+func warmRequestTimeout(sloMillis int64) time.Duration {
+	if sloMillis <= 0 {
+		return warmProbeTimeout
+	}
+	if t := time.Duration(2*sloMillis) * time.Millisecond; t > warmProbeTimeout {
+		return t
+	}
+	return warmProbeTimeout
+}
 
 // triggerHttp repeatedly GETs targetURL until the response body contains
 // expectedResponse. URL is constructed by the caller via
@@ -91,17 +106,18 @@ func triggerHttp(ctx context.Context, phase, targetURL, expectedResponse string)
 // too brittle for endpoints whose response varies per request (e.g.
 // inference detections).
 //
-// Mirrors triggerHttp's structure: same per-request timeout, same
-// ctx-aware retry loop, same phase-tagged logging. Cold path keeps using
-// the original triggerHttp so its behavior is unchanged.
-func triggerHttpWithCodeBody(ctx context.Context, phase, targetURL string, expectedCode int, bodyContains string) (time.Duration, error) {
+// Mirrors triggerHttp's structure: same ctx-aware retry loop, same phase-tagged
+// logging. perReqTimeout is the per-request HTTP client timeout — callers pass
+// warmRequestTimeout(warmSLO) so minute-scale workloads aren't cut off mid-
+// response. Cold path keeps using the original triggerHttp so it's unchanged.
+func triggerHttpWithCodeBody(ctx context.Context, phase, targetURL string, expectedCode int, bodyContains string, perReqTimeout time.Duration) (time.Duration, error) {
 	if bodyContains == "" {
 		logging.Normal(fmt.Sprintf("[%s] curl GET %s (expect code=%d)", phase, targetURL, expectedCode))
 	} else {
 		logging.Normal(fmt.Sprintf("[%s] curl GET %s (expect code=%d, body~%q)", phase, targetURL, expectedCode, bodyContains))
 	}
 
-	client := &http.Client{Timeout: warmProbeTimeout}
+	client := &http.Client{Timeout: perReqTimeout}
 	start := time.Now()
 
 	for {

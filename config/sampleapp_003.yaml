@@ -12,10 +12,8 @@ spec:
         autoscaling.knative.dev/max-scale: '1'
     spec:
       containerConcurrency: 1
-      nodeSelector:
-        kubernetes.io/hostname: "worker"
       containers:
-        - image: docker.io/lazyken/measure-yolo:v1@sha256:9a38fd8b5cef9c11dd48532813a7ace6409bebc027f9d0a612e10353f32fb2f6
+        - image: docker.io/lazyken/measure-yolo:v1
           resources:
             requests:
               cpu: "100m"

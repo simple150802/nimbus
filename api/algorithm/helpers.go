@@ -166,15 +166,24 @@ const (
 	// waitForScaleToZero and (b) successive curl retries inside triggerHttp.
 	probeRetryInterval = 2 * time.Second
 
-	// interSampleSleep is the cool-down between samples within one probe.
-	// Force-deleting the pod only clears it from the k8s API — the
-	// node-level container and Knative's endpoint routing take a few seconds
-	// to catch up. Without this delay, the next curl can land on the still-
-	// terminating warm pod and record a bogus sub-second "cold start".
-	// 10 s empirically covers both kubelet grace and Knative endpoint
-	// propagation. Also gives queue-proxy time to recover from transient
-	// errors between samples.
-	interSampleSleep = 10 * time.Second
+	// interColdSampleSleep is the cool-down between cold-phase samples.
+	// Each cold sample force-deletes the pod and waits for scale-to-zero;
+	// this delay then lets the node-level container teardown and Knative
+	// endpoint routing fully propagate before the next trigger. Without it
+	// the next curl can land on a still-terminating pod and record a bogus
+	// sub-second "cold start". 10 s empirically covers kubelet grace +
+	// Knative endpoint propagation.
+	interColdSampleSleep = 10 * time.Second
+
+	// interWarmSampleSleep is the cool-down between warm-phase timed samples.
+	// The pod is already up (the warmup curl brought it up before the timed
+	// loop), so no endpoint propagation is needed. The only requirement is
+	// that the gap stays well below the ksvc's autoscaling window so KPA
+	// does not scale the pod to zero between samples and turn "warm"
+	// measurements into cold starts. 2 s is enough for queue-proxy to drain
+	// the previous request at containerConcurrency=1 while staying far
+	// shorter than a typical autoscaling window (≥ 10 s).
+	interWarmSampleSleep = 2 * time.Second
 
 	phaseCold = "COLD"
 	phaseWarm = "WARM"

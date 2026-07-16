@@ -1,0 +1,36 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: io-probe-003
+  namespace: serverless
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/window: 10s
+        autoscaling.knative.dev/min-scale: '0'
+        autoscaling.knative.dev/max-scale: '1'
+    spec:
+      containerConcurrency: 1
+      containers:
+        - image: docker.io/meowbyanh/rust-ioread:v2
+          ports:
+            - containerPort: 8000
+          env:
+            # Số file generate lúc cold start — tăng để cold start lâu hơn
+            - name: INIT_FILES
+              value: "500"
+            # Kích thước mỗi file (KB) — tổng = INIT_FILES × FILE_SIZE_KB
+            - name: FILE_SIZE_KB
+              value: "128"
+            # Số file open/read mỗi warm request
+            - name: OPEN_COUNT
+              value: "200"
+            # sync_all() sau mỗi write lúc init (true/false)
+            - name: USE_FSYNC
+              value: "true"
+          resources:
+            requests:
+              cpu: "200m"
+            limits:
+              cpu: "200m"

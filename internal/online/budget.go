@@ -11,15 +11,17 @@ import (
 	"nimbus/api/kubeconfig"
 )
 
-// nodeFree is one candidate pool node's live headroom for the serverless
-// namespace. All CPU values are millicores. free is mutated within a single
-// reconcile tick by deductCold as ksvcs are placed (online.md §5.5).
+// nodeFree is one candidate pool node's live headroom. All CPU values are
+// millicores. free is the smaller of two views (see buildPoolSnapshot) and is
+// mutated within a single reconcile tick by deductCold as ksvcs are placed
+// (online.md §5.5).
 type nodeFree struct {
-	name     string
-	allocCPU int64 // node.status.allocatable.cpu
-	budget   int64 // (NIMBUS_BUDGET_PCT/100) × allocCPU
-	used     int64 // Σ serverless-knative pod requests bound to this node
-	free     int64 // max(0, budget − used)
+	name           string
+	allocCPU       int64 // node.status.allocatable.cpu
+	budget         int64 // (NIMBUS_BUDGET_PCT/100) × allocCPU — serverless soft cap
+	serverlessUsed int64 // Σ Knative pod requests in ns (soft-budget accounting)
+	allUsed        int64 // Σ ALL pod requests bound to the node (physical accounting)
+	free           int64 // max(0, min(budget − serverlessUsed, allocCPU − allUsed))
 }
 
 // usable returns the free CPU the waterfall may spend on this node. In BURST
@@ -50,10 +52,18 @@ func (s *poolSnapshot) poolMaxUsable(reserve float64, burst bool) int64 {
 }
 
 // buildPoolSnapshot resolves the Nimbus pool, reads live allocatable CPU and
-// the serverless namespace's committed Knative pod requests, and computes
-// free_n per node. One nodes.list + one pods.list — no persistent ledger
-// (online.md §5.5). Returns an error when the pool selector matches no Ready
-// nodes (caller treats it as "can't place").
+// the committed pod requests, and computes free_n per node as the SMALLER of
+// two views:
+//
+//	soft  = budget − serverlessUsed   (don't exceed the serverless soft cap)
+//	phys  = allocatable − allUsed      (don't exceed what kube-scheduler will fit)
+//
+// The phys term closes the gap where a node looks free to NIMBUS but is
+// actually filled by non-serverless workloads (system pods, other namespaces),
+// which the scheduler's NodeResourcesFit counts and NIMBUS previously ignored.
+// One nodes.list + one pods.list — no persistent ledger (online.md §5.5).
+// Returns an error when the pool selector matches no Ready nodes (caller treats
+// it as "can't place").
 func buildPoolSnapshot(ctx context.Context, selector map[string]string, ns string, pct int) (*poolSnapshot, error) {
 	nodes, err := resolvePoolNodes(ctx, selector, pct)
 	if err != nil {
@@ -62,11 +72,13 @@ func buildPoolSnapshot(ctx context.Context, selector map[string]string, ns strin
 	if len(nodes) == 0 {
 		return nil, fmt.Errorf("no Ready schedulable nodes match pool selector %v", selector)
 	}
-	computeUsed(ctx, ns, nodes)
+	if err := computeUsed(ctx, ns, nodes); err != nil {
+		return nil, err
+	}
 
 	snap := &poolSnapshot{nodes: nodes, byName: make(map[string]*nodeFree, len(nodes))}
 	for _, n := range nodes {
-		n.free = maxZero(n.budget - n.used)
+		n.free = maxZero(minInt64(n.budget-n.serverlessUsed, n.allocCPU-n.allUsed))
 		snap.byName[n.name] = n
 	}
 	return snap, nil
@@ -98,19 +110,29 @@ func resolvePoolNodes(ctx context.Context, selector map[string]string, pct int) 
 	return out, nil
 }
 
-// computeUsed sums the CPU requests of serverless-namespace Knative pods bound
-// to each candidate node (Running or Pending-but-bound). Best-effort: a list
-// error leaves used at zero (the next tick retries) rather than aborting.
-func computeUsed(ctx context.Context, ns string, nodes []*nodeFree) {
+// computeUsed sums CPU requests per candidate node into two buckets (Running or
+// Pending-but-bound pods only):
+//
+//   - allUsed: EVERY pod bound to the node, across all namespaces — the physical
+//     view kube-scheduler enforces via NodeResourcesFit (allocatable − Σ requests).
+//   - serverlessUsed: Knative pods in ns — the serverless soft-budget view.
+//
+// buildPoolSnapshot then takes free = min(budget − serverlessUsed,
+// allocatable − allUsed), so NIMBUS never reads a node as free that the
+// scheduler would consider full (e.g. filled by system/other-namespace pods).
+//
+// A pods.list error is propagated (fail-closed): buildPoolSnapshot then aborts
+// and the caller treats the tick as "can't place". The old best-effort
+// behaviour left used=0 on a list error, which reads a full node as empty and
+// admits on top of it (overcommit) — worse than briefly deferring the decision.
+func computeUsed(ctx context.Context, ns string, nodes []*nodeFree) error {
 	idx := make(map[string]*nodeFree, len(nodes))
 	for _, n := range nodes {
 		idx[n.name] = n
 	}
-	pods, err := kubeconfig.CLIENTSET.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{
-		LabelSelector: "serving.knative.dev/service",
-	})
+	pods, err := kubeconfig.CLIENTSET.CoreV1().Pods(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return
+		return fmt.Errorf("list pods for headroom: %w", err)
 	}
 	for i := range pods.Items {
 		p := &pods.Items[i]
@@ -124,10 +146,18 @@ func computeUsed(ctx context.Context, ns string, nodes []*nodeFree) {
 		if nf == nil {
 			continue // pod on a node outside this pool
 		}
+		var podCPU int64
 		for c := range p.Spec.Containers {
-			nf.used += p.Spec.Containers[c].Resources.Requests.Cpu().MilliValue()
+			podCPU += p.Spec.Containers[c].Resources.Requests.Cpu().MilliValue()
+		}
+		nf.allUsed += podCPU
+		if p.Namespace == ns {
+			if _, isKnative := p.Labels["serving.knative.dev/service"]; isKnative {
+				nf.serverlessUsed += podCPU
+			}
 		}
 	}
+	return nil
 }
 
 func nodeReadySchedulable(n *corev1.Node) bool {
@@ -157,4 +187,11 @@ func maxZero(v int64) int64 {
 		return 0
 	}
 	return v
+}
+
+func minInt64(a, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
 }

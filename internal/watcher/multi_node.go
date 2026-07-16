@@ -98,6 +98,10 @@ func loadPerNodeFromStatus(current *nimbusevent.NimbusEvent) {
 		current.PerNodeResults[node] = &nimbusevent.NodeResult{
 			StartingCpu:       r.StartingCpu,
 			RunningCpu:        r.RunningCpu,
+			CMinStarting:      r.CMinStarting,
+			CMinRunning:       r.CMinRunning,
+			StartingRt:        r.StartingRt,
+			RunningRt:         r.RunningRt,
 			ColdRtSamples:     cold,
 			WarmRtSamples:     warm,
 			StartingSaturated: r.StartingCpu != "",

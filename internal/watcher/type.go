@@ -80,6 +80,7 @@ func (nw *NimbusWatcher) Upsert(newEvent *nimbusevent.NimbusEvent) {
 
 	for cur := nw.head; cur != nil; cur = cur.Next {
 		if matches(cur, newEvent) {
+			cur.Metadata = newEvent.Metadata // keep stored Generation current
 			cur.Selector = newEvent.Selector
 			cur.Spec = newEvent.Spec
 			cur.Status = newEvent.Status
@@ -140,6 +141,29 @@ func (nw *NimbusWatcher) Dequeue(target *nimbusevent.NimbusEvent) *nimbusevent.N
 func matches(a, b *nimbusevent.NimbusEvent) bool {
 	return a.Metadata.Namespace == b.Metadata.Namespace &&
 		a.Metadata.Name == b.Metadata.Name
+}
+
+// specChanged reports whether ev carries a newer spec generation than the copy
+// NIMBUS already tracks (in completed or the work queue). A false result means
+// this Modified is a status-only write (our own .status.perNode / .status.online
+// patches bump resourceVersion but NOT generation) and must NOT disturb the
+// queue/completed state — doing so drops the Nimbus from completed and nils
+// PerNodeResults until the worker re-completes it, during which /decide returns
+// a spurious passthrough. Unknown Nimbuses count as changed (safe: reconcile).
+func (nw *NimbusWatcher) specChanged(ev *nimbusevent.NimbusEvent) bool {
+	nw.mu.RLock()
+	defer nw.mu.RUnlock()
+
+	key := ev.Metadata.Namespace + "/" + ev.Metadata.Name
+	if c, ok := nw.completed[key]; ok && c != nil {
+		return ev.Metadata.Generation != c.Metadata.Generation
+	}
+	for cur := nw.head; cur != nil; cur = cur.Next {
+		if matches(cur, ev) {
+			return ev.Metadata.Generation != cur.Metadata.Generation
+		}
+	}
+	return true
 }
 
 // ListCompleted returns defensive-copy snapshots of every completed Nimbus,

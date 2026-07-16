@@ -1,0 +1,32 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: jvm-probe-003
+  namespace: serverless
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/window: 10s
+        autoscaling.knative.dev/min-scale: '0'
+        autoscaling.knative.dev/max-scale: '1'
+    spec:
+      containerConcurrency: 1
+      containers:
+        - image: docker.io/meowbyanh/jvm-probe:v1
+          ports:
+            - containerPort: 8000
+          env:
+            # Cold start: JVM init + JIT tier escalation + hash chain
+            # 5M iterations ≈ 3-8s at 1000m, scales clearly with CPU
+            - name: INIT_ITERATIONS
+              value: "5000000"
+            # Warm steady-state: JIT-compiled code, much cheaper per iteration
+            # 1M iterations ≈ 200-500ms at 1000m
+            - name: ITERATIONS
+              value: "500000"
+          resources:
+            requests:
+              cpu: "200m"
+            limits:
+              cpu: "200m"

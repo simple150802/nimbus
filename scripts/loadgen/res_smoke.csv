@@ -1,0 +1,7 @@
+label,event_offset,ksvc,decided,decision,tier,boost_cpu,mode,send_wallclock,latency_ms,http_code,attempts
+smoke,0.000,loadtest-yolo-001,1,admit,c_opt,975m,NORMAL,1784049951.449,11296.2,200,60
+smoke,5.000,loadtest-yolo-002,1,admit,c_opt,975m,NORMAL,1784049956.450,10878.9,200,58
+smoke,10.000,loadtest-yolo-003,1,admit,c_opt,975m,NORMAL,1784049961.450,11969.6,200,62
+smoke,15.000,loadtest-yolo-001,1,admit,c_opt,975m,NORMAL,1784049966.450,6.1,200,1
+smoke,20.000,loadtest-yolo-002,1,admit,c_opt,975m,NORMAL,1784049971.451,5.5,200,1
+smoke,25.000,loadtest-yolo-003,1,admit,c_opt,975m,NORMAL,1784049976.451,6.1,200,1

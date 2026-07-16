@@ -228,21 +228,26 @@ type OnlineAssignment struct {
 
 	// Node is the Kubernetes node chosen for this ksvc. Written to the
 	// ksvc as spec.template.spec.nodeSelector["kubernetes.io/hostname"].
-	Node string `json:"node"`
+	// omitempty: a Pending row omits it (CRD requires only ksvc).
+	Node string `json:"node,omitempty"`
 
 	// Tier is one of TierCOpt / TierCMin. See those constants for the
 	// per-tier source rules. There is no c_floor tier — when neither
 	// c_opt nor c_min fits, /decide returns Pending (KPA aborts the
 	// scale-up) rather than admitting at a sub-c_min CPU.
-	Tier string `json:"tier"`
+	// omitempty is REQUIRED: a Pending row has no tier, and the CRD enum
+	// (c_opt/c_min/best_fit) rejects an empty string — without omitempty the
+	// whole .status.online write fails validation whenever a ksvc is Pending.
+	Tier string `json:"tier,omitempty"`
 
 	// StartingCpu is the cold-phase CPU written into the per-ksvc
 	// StartupCPUBoost CR. k8s-quantity string ("931m", "1500m").
-	StartingCpu string `json:"startingCpu"`
+	// omitempty: empty on a Pending row; the CRD quantity pattern rejects "".
+	StartingCpu string `json:"startingCpu,omitempty"`
 
 	// RunningCpu is the steady-state CPU patched onto the ksvc itself.
-	// Always <= StartingCpu.
-	RunningCpu string `json:"runningCpu"`
+	// Always <= StartingCpu. omitempty for the same reason as StartingCpu.
+	RunningCpu string `json:"runningCpu,omitempty"`
 
 	// Degraded is set when /decide refused to assign at any tier
 	// (neither c_opt nor c_min fit anywhere with available headroom).
@@ -280,6 +285,10 @@ type OnlineAssignment struct {
 type NimbusMetadata struct {
 	Name      string `json:"name"`
 	Namespace string `json:"namespace"`
+	// Generation increments ONLY on spec changes (the CRD has a status
+	// subresource), so status-only writes leave it unchanged. The watcher uses
+	// this to ignore its own .status writes instead of re-reconciling on them.
+	Generation int64 `json:"generation"`
 }
 
 type NimbusSelector struct {

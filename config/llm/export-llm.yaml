@@ -1,0 +1,87 @@
+# Nimbus that runs the binary search and exports per-probe samples to disk.
+# Variant for the LLM sample app (sample_app/measure_llm) which loads
+# Gemma 2 2B (Text-to-Text) + Stable Diffusion v1.5 (Text-to-Image) on
+# startup and exposes /loading-stats + /text2text + /text2image.
+#
+# Apply:
+#   kubectl apply -f config/my-boost-export-llm.yaml
+#
+# Cold-start here = both models loaded. /loading-stats reports
+# "ready" only after Llama AND StableDiffusion finish initializing
+# (see sample_app/measure_llm/main.py:initialize_models). That makes
+# /loading-stats the natural cold gate (mirrors YOLO's /status).
+#
+# Warm gate = a real text2text inference call: the response body
+# contains "reply" iff the LLM produced text, so the gate measures
+# CPU-bound inference time rather than a flag-read.
+apiVersion: lazyken.io/v1alpha1
+kind: Nimbus
+metadata:
+  name: boost-005
+  namespace: serverless
+selector:
+  matchExpressions:
+  - key: serving.knative.dev/service
+    operator: In
+    values: ["measure-llm-001", "measure-llm-002", "measure-llm-003"]
+spec:
+  # Pool of nodes that share the same compute profile. NIMBUS measures
+  # one sorted representative and applies the resulting (c_opt, c_min)
+  # to every ksvc in selector.values[]. Label the nodes first, e.g.:
+  #   kubectl label node worker-1 nimbus.io/pool=serverless
+  placement:
+    nodeSelector:
+      nimbus.io/pool: serverless
+
+  # RT percentile the binary search converges against. Default p95;
+  # avg / p90 also accepted.
+  metric: p95
+
+  # Per-phase latency budgets (ms). Phase 2 (online) derives c_min from
+  # these + the cold/warm sample list. Offline only uses them to pick
+  # c_min after the bisect finishes.
+  # LLM is much heavier than YOLO: gemma+SD load takes tens of seconds,
+  # so cold SLO is correspondingly large. Inference is also slower.
+  # Tune these to match your service contract.
+  acceptableResponseTime:
+    cold: 5000   # 60s — enough headroom for both models to load on Edge
+    warm: 80000   # 10s — Gemma 2 text2text inference on CPU
+
+  # Write per-probe raw TTFB CSVs + meta.json + per-node result.json
+  # under <dir>/<run-start-timestamp>/.
+  export:
+    dir: "./results"
+
+  # Per-Nimbus online-stage opt-out — keep offline-only for first
+  # measurement run, flip to true once the data is in.
+  online:
+    enabled: false
+
+  # Cold probes are expensive — each one forces a scale-to-zero before
+  # a fresh model load. Keep coldSamples small.
+  measurement:
+    coldSamples: 20
+    warmSamples: 20
+
+  resourcePolicy:
+    containerPolicies:
+    - containerName: user-container
+      # LLM workload needs more CPU headroom than YOLO. The bisect
+      # descends from this ceiling; the safety floor (50m) and 100m
+      # resolution threshold terminate the search.
+      cpuBudget: "2000m"
+
+  durationPolicy:
+    # Cold gate — also written into each per-ksvc StartupCPUBoost CR
+    # so the upstream kube-startup-cpu-boost webhook polls the same
+    # URL during boost mode.
+    coldApiCondition:
+      path: "/loading-stats"
+      response: "ready"
+    # Warm gate — hits the text2text inference endpoint with a tiny
+    # prompt so the binary search measures CPU-sensitive inference,
+    # not a /loading-stats flag read.
+    warmApiCondition:
+      path: "/text2text?prompt=hi"
+      statusCode: 200
+      bodyContains: "reply"

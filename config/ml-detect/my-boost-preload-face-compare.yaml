@@ -1,0 +1,99 @@
+# Nimbus that loads a previously-exported run instead of re-measuring.
+# Use this manifest when you already have results under
+# <repo>/results/<timestamp>/ from a previous apply of config/my-boost-export.yaml.
+#
+# Workflow:
+#   1. kubectl delete nimbus boost-001 -n serverless    # clears .status; preMeasured needs a clean slate
+#   2. Edit preMeasured.loadFromDir below to the run you want to reuse
+#   3. kubectl apply -f config/my-boost-preload.yaml
+#
+# Expected controller log on apply:
+#   [preMeasured] ../results/<ts>: loaded node=<n> starting=<x>m running=<y>m
+#   Skipping binary search — all <N> candidate node(s) saturated
+#
+# If a node is missing from <loadFromDir> (e.g. only worker/result.json exists),
+# that node falls through to the slow path and the binary search runs only for
+# the missing node(s). Mix-and-match per node is supported.
+apiVersion: lazyken.io/v1alpha1
+kind: Nimbus
+metadata:
+  name: boost-002
+  namespace: serverless
+selector:
+  matchExpressions:
+  - key: serving.knative.dev/service
+    operator: In
+    values: ["insignface-001", "insignface-002", "insignface-003"]
+spec:
+  # Required. Declares the Nimbus-owned node pool. For preload this should
+  # match the placement.nodeSelector used in the export run — otherwise the
+  # loaded per-node profile is being applied to a different pool. Same
+  # apply-time semantics as my-boost-export.yaml: this selector is written
+  # verbatim onto every ksvc in selector.values[].
+  placement:
+    nodeSelector:
+      nimbus.io/pool: serverless
+
+  # Optional: must match the metric used when the loaded run was exported,
+  # otherwise the loader logs a [preMeasured] mismatch warning and the
+  # loaded CPU values reflect the *original* run's metric, not this one.
+  metric: p95
+
+  # Optional: latency budgets. For preload, keep these identical to
+  # the exported run because result.json imports cMinStarting/cMinRunning
+  # as SLO-derived snapshots. If you change the SLO or metric, re-measure
+  # instead of treating the imported c_min values as valid.
+  acceptableResponseTime:
+    cold: 7500
+    warm: 12000
+
+  # Path to the timestamped run directory produced by a previous
+  # config/my-boost-export.yaml apply. Edit the timestamp to match your
+  # actual results/ subdir before applying. Path-resolution rules are
+  # identical to spec.export.dir (relative against cwd, absolute as-is).
+  preMeasured:
+    loadFromDir: "./results/face-compare"
+
+  # Optional: per-Nimbus online-stage opt-out.
+  #   online.enabled: true   → online stage active for this Nimbus
+  #                            (waterfall picks tier per cold-start, polling
+  #                             reconciler maintains .status.online).
+  #   online.enabled: false  → /decide returns "passthrough" for this Nimbus's
+  #                            ksvcs, polling reconciler skips it. KPA's hook
+  #                            then proceeds with the upstream replicas-only
+  #                            patch; the ksvc still has whatever offline /
+  #                            preload wrote (pool selector + c_opt_warm +
+  #                            boost CR at c_opt_cold) — so cold-start still
+  #                            benefits from the loaded profile, just without
+  #                            adaptive tier downgrade / hostname pinning.
+  # Absent / commented = default true (online active). Uncomment to opt out.
+  online:
+    enabled: false
+
+  # Same workload definition as the export manifest — required fields. The
+  # controller still creates the StartupCPUBoost CR + patches the ksvc CPU
+  # limits at apply time, using the loaded startingCpu / runningCpu values.
+  measurement:
+    coldSamples: 20
+    warmSamples: 20
+  resourcePolicy:
+    containerPolicies:
+    - containerName: user-container
+      # Economic ceiling — same as the export manifest (it must match
+      # the cpuBudget the loaded run was measured under; otherwise the
+      # loaded c_opt / c_min values are semantically incorrect for the
+      # current run).
+      cpuBudget: "2000m"
+  durationPolicy:
+    # Cold gate — also written into the per-ksvc StartupCPUBoost CR.
+    coldApiCondition:
+      path: "/status"
+      response: "READY"
+    # Warm gate — workload endpoint so warm-phase RT actually scales
+    # with CPU. Required even for preload, since on apply the controller
+    # still creates StartupCPUBoost + patches ksvc CPU (these don't need
+    # warm probing, but the spec validation still requires the field).
+    warmApiCondition:
+      path: "/detect/local"
+      statusCode: 200
+      bodyContains: "\"success\":true"
