@@ -199,6 +199,49 @@ for nb in boost-001 boost-002 boost-005 boost-006 boost-004; do
 done
 ```
 
+## Schedule modes & naming runs (so analyze picks the right files)
+
+### The three arrival modes
+
+| Mode | Command (mix example) | Use for |
+|------|-----------------------|---------|
+| **periodic** | `gen_schedule.py --mode periodic --ksvcs-file mix.ksvcs --duration 600 --rate 0.1 --cooldown 120 --seed 42 --out sched.csv` | evenly spaced, repeatable — cleanest A/B (E1) |
+| **poisson** | `--mode poisson --rate 0.2 --duration 600 --cooldown 120 ...` | random arrivals (E2) |
+| **burst** | `--mode burst --baseline-rate 0.1 --wave-size 12 --wave-at 60,180 --duration 240 ...` | turn the burst detector on/off (E3) |
+
+`--rate` is events/sec: **periodic** spaces them exactly `1/rate` s apart (rate 0.1 =
+one every 10 s); **poisson** uses `rate` as the mean. Keep `--seed` fixed so the SAME
+schedule is replayed across every config of one experiment.
+
+### Naming so `analyze.py` pairs and separates runs correctly
+
+`analyze.py` pairs `res_<name>.csv` (replay) with `res_<name>.nodes.csv` (sampler) —
+the nodes file MUST be the results name **+ `.nodes.csv`** — and groups rows by the
+`label` COLUMN inside the CSV. So for each run, keep `<name>` identical across the
+three commands:
+
+- **replay:** `--label <name> --out res_<name>.csv`
+- **sampler:** `--label <name> --out res_<name>.nodes.csv`  ← same `<name>`, add `.nodes`
+
+Pick `<name> = <experiment>_<config>`, e.g. `e1_nimbus`, `e1_high`, `mixP1_nimbus`
+(P1 = periodic rate 0.1). Different experiments (different rate/pattern) → different
+`<name>` → runs never clobber each other on disk.
+
+**Draw one figure per experiment by passing EXPLICIT files** — don't rely on the
+default `res_*.csv` glob, which would lump every run you've ever done into one plot:
+
+```bash
+# experiment E1 (periodic 0.1) — compare THIS experiment's 3 configs only
+python3 analyze.py res_e1_nimbus.csv res_e1_low.csv res_e1_high.csv --plot --prefix e1
+
+# a different experiment (periodic 0.2) — its own files + its own prefix
+python3 analyze.py res_e2_nimbus.csv res_e2_high.csv --plot --prefix e2
+```
+
+Each config = one table row / one frontier point. Two files sharing the SAME `label`
+are MERGED into one config — use that on purpose to combine the /status-mix run and
+the LLM run of the same config (give both `--label mix_nimbus`).
+
 ## How cold-start latency is measured
 
 This workload's `/status` returns **503 while the YOLO model loads**, then
@@ -263,10 +306,29 @@ same cold-start latency**, and far better latency than static-low — so it sits
 the efficiency frontier. Join `res_*.nodes.csv` (epoch) with `res_*.csv`
 (send_wallclock) to line up "resource reserved" against "cold-start served".
 
-> **Also** — NIMBUS already computes per-node free in `buildPoolSnapshot`; if you
-> want NIMBUS's own view logged per `/decide`, that's a one-line add in
-> `internal/online/budget.go`. The external sampler above is the fair cross-config
-> comparison; the internal log is only for cross-checking NIMBUS's math.
+### Turn the CSVs into a table + figures — `analyze.py`
+
+```bash
+# after running >= 1 config (comparison figures need >= 2)
+python3 analyze.py res_mix.csv res_off.csv res_high.csv --plot --prefix analysis
+```
+For each config (grouped by the `label` column) it prints and writes
+`analysis_summary.csv`: cold-start p50/p95/p99, served %, peak/mean reserved CPU,
+**CPU-seconds** (total AND above the system baseline), and utilization
+(`used/requested`). `analysis_timeseries.csv` has per-config reserved-CPU-over-time
+for external plotting. With `--plot` (matplotlib) it also writes:
+`analysis_reserved.png` (reserved CPU over time), `analysis_frontier.png`
+(p95 latency vs CPU-seconds — the money figure), `analysis_cpusec.png` (bar).
+
+It analyses whatever configs are present — run it after each config to accumulate.
+`CPU-seconds (attr)` subtracts the system floor (10th-percentile pool requested),
+so it reflects only the experiment's reserved CPU.
+
+> **NIMBUS's own view** — set `NIMBUS_LOG_SNAPSHOT=1` when starting NIMBUS to log
+> per-node free (`event=pool_headroom`) at every `/decide`/tick, to cross-check
+> NIMBUS's math against `resources.csv`. The external sampler is the FAIR
+> cross-config comparison (baselines don't run NIMBUS); the internal log is only a
+> sanity check.
 
 ## Options reference
 
@@ -329,8 +391,18 @@ the efficiency frontier. Join `res_*.nodes.csv` (epoch) with `res_*.csv`
 | `--label` | nimbus | config label in output |
 | `--out` | resources.csv | output |
 
+**analyze.py** — CSVs → comparison table + figures:
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `results` (positional) | glob `res_*.csv` | replay output CSVs (nodes CSV auto-found) |
+| `--prefix` | analysis | output file prefix |
+| `--plot` | off | also write PNGs (needs matplotlib) |
+
 ## Next (not yet built)
 
 - **Filler**: a Deployment that reserves a tunable CPU on the pool nodes, to create
   the constrained-cluster state E2/E3 need.
-- **Timeline merger**: join `results.csv` + `nimbus.log` + `resources.csv` by time.
+- **nimbus.log join**: `analyze.py` joins `results.csv` + `resources.csv`; adding
+  `nimbus.log` (burst mode transitions, tier decisions) on the same time axis is
+  still manual.
