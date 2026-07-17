@@ -8,9 +8,13 @@ Three tools, decoupled so the arrival model is separate from replay:
 
 | Tool | Job |
 |------|-----|
-| `gen_fleet.py`     | emit N identical ksvcs (+ a Nimbus CR that preloads a measured profile) |
-| `gen_schedule.py`  | turn an arrival MODEL (periodic / poisson / burst) into a fixed `schedule.csv` |
-| `replay.py`        | replay `schedule.csv`, POST `/decide`, fire the request, log cold-start latency |
+| `gen_fleet.py`        | emit N identical ksvcs (+ a Nimbus CR that preloads a measured profile) |
+| `gen_schedule.py`     | turn an arrival MODEL (periodic / poisson / burst) into a fixed `schedule.csv` |
+| `replay.py`           | replay `schedule.csv`, POST `/decide`, fire the request, log cold-start latency |
+| `sample_resources.py` | snapshot pool-node CPU (requested/used/free) while a run happens |
+| `gen_filler.py`       | reserve CPU on pool nodes to create controlled contention |
+| `set_baseline.py`     | pin apps to a static CPU policy (opt/min/uniform) for baselines |
+| `analyze.py`          | CSVs → comparison table + figures (latency, CPU-seconds, goodput) |
 
 ## Prerequisites (read this or every `/decide` returns `passthrough`)
 
@@ -198,6 +202,71 @@ for nb in boost-001 boost-002 boost-005 boost-006 boost-004; do
   kubectl patch nimbus "$nb" -n serverless --type=merge -p '{"spec":{"online":{"enabled":false}}}'
 done
 ```
+
+## Contention experiments (the main resource-efficiency proof)
+
+On an **idle** cluster NIMBUS gives every app Tier-1 c_opt — indistinguishable from
+a static-opt policy. Its value only appears under **resource pressure**, where the
+waterfall degrades (c_opt → c_min → best-fit) to fit more pods while still meeting
+SLO. So the scientific test **must create contention** — that's what `gen_filler.py`
+is for.
+
+**Claim (what the figures prove):** under a fixed CPU budget with time-varying load,
+NIMBUS serves the most cold-starts *within SLO* — it reserves only `c_min_warm`
+steady-state (packs more than a c_opt-warm policy, still meets the warm SLO) and
+picks the cold boost adaptively (c_opt when there's room, c_min/best-fit when tight).
+No static policy matches its density AND latency across the load range.
+
+**Baselines** (`set_baseline.py` sets the exact boost level, then `online=false`):
+
+| Policy | cold | warm | meaning |
+|--------|------|------|---------|
+| `--policy opt` | c_opt_cold | c_opt_warm | profiled, generous → **fewer pods fit** |
+| `--policy min` | c_min_cold | c_min_warm | profiled, tight → max density, but slow cold-start when idle |
+| `--policy uniform --cpu 2000m` | fixed | fixed | no profiling, one-size-fits-all |
+| (NIMBUS) `--policy nimbus` | adaptive | c_min_warm | restore adaptive (undo a baseline) |
+
+**Budget for 3×16-core nodes** (~30 CPU usable serverless after 70% cap + system):
+the mix needs ~6 CPU warm under NIMBUS vs ~12 under static-opt, so squeeze the
+effective pool to **~9 CPU** (filler reserves **7000m/node**) — static-opt overflows
+and rejects, NIMBUS fits. Sweep `{5000m, 7000m, 9000m}` per node for the frontier.
+
+### Exp A — load/budget sweep (Pareto frontier)
+
+Fix the budget (one filler level), sweep offered load (`--rate`), and per config
+plot goodput / density / p95 vs load. Repeat at a few filler levels.
+
+```bash
+python3 gen_filler.py --cpu 7000m --out filler.yaml && kubectl apply -f filler.yaml
+# NIMBUS run (online already true on the mix Nimbuses):
+python3 sample_resources.py --label expA_nimbus --out res_expA_nimbus.nodes.csv &
+python3 replay.py --schedule sched_mix.csv --label expA_nimbus --out res_expA_nimbus.csv
+# static-opt baseline (same schedule):
+python3 set_baseline.py --policy opt --nimbuses boost-001,boost-002,boost-006,boost-004
+python3 sample_resources.py --label expA_opt --out res_expA_opt.nodes.csv &
+python3 replay.py --schedule sched_mix.csv --no-decide --label expA_opt --out res_expA_opt.csv
+# static-min baseline:
+python3 set_baseline.py --policy min --nimbuses boost-001,boost-002,boost-006,boost-004
+# ... replay --no-decide --label expA_min ...
+python3 set_baseline.py --policy nimbus --nimbuses boost-001,boost-002,boost-006,boost-004  # restore
+kubectl delete -f filler.yaml
+```
+
+### Exp B — time-varying load (the one-figure proof)
+
+Same constrained budget, but a schedule with lulls + spikes (`--mode burst`). In one
+run NIMBUS beats static-opt on goodput during spikes AND static-min on latency during
+lulls — no static policy wins both.
+
+### Analyse with goodput
+
+```bash
+python3 analyze.py res_expA_nimbus.csv res_expA_opt.csv res_expA_min.csv --plot \
+  --prefix expA \
+  --slo measure-yolo=16000 --slo insignface=16000 --slo jvm-probe=... --slo io-probe=...
+```
+`goodput%` = served AND time-to-READY ≤ that app's cold SLO. Read each app's SLO
+from its Nimbus CR (`spec.acceptableResponseTime.cold`).
 
 ## Schedule modes & naming runs (so analyze picks the right files)
 
@@ -391,6 +460,25 @@ so it reflects only the experiment's reserved CPU.
 | `--label` | nimbus | config label in output |
 | `--out` | resources.csv | output |
 
+**gen_filler.py** — reserve CPU on pool nodes (create contention):
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--cpu` | (required) | CPU reserved per pool node, e.g. 7000m |
+| `--replicas` | 3 | = number of pool nodes (one filler pod each) |
+| `--pool-selector` | nimbus.io/pool=serverless | which nodes |
+| `--image` | busybox:1.36 | sleep container |
+| `--out` | filler.yaml | output |
+
+**set_baseline.py** — pin apps to a static CPU policy:
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--policy` | (required) | `opt` / `min` / `uniform` / `nimbus` (restore) |
+| `--nimbuses` | (required) | comma list, e.g. boost-001,boost-002 |
+| `--cpu` | — | fixed CPU for `--policy uniform` |
+| `--namespace` | serverless | namespace |
+
 **analyze.py** — CSVs → comparison table + figures:
 
 | Flag | Default | Purpose |
@@ -398,11 +486,11 @@ so it reflects only the experiment's reserved CPU.
 | `results` (positional) | glob `res_*.csv` | replay output CSVs (nodes CSV auto-found) |
 | `--prefix` | analysis | output file prefix |
 | `--plot` | off | also write PNGs (needs matplotlib) |
+| `--cold-slo` | — | default cold SLO ms → enables `goodput%` |
+| `--slo` | — | per-app SLO, repeatable: `--slo measure-yolo=16000` |
 
 ## Next (not yet built)
 
-- **Filler**: a Deployment that reserves a tunable CPU on the pool nodes, to create
-  the constrained-cluster state E2/E3 need.
 - **nimbus.log join**: `analyze.py` joins `results.csv` + `resources.csv`; adding
   `nimbus.log` (burst mode transitions, tier decisions) on the same time axis is
   still manual.

@@ -40,13 +40,18 @@ def pct(vals, p):
     return s[k]
 
 
-def replay_metrics(rows):
+def replay_metrics(rows, slo_fn=None):
     total = len(rows)
     served = [r for r in rows if r.get("http_code") == "200" and r.get("latency_ms")]
     lat = [float(r["latency_ms"]) for r in served]
     dec = {}
     for r in rows:
         dec[r.get("decision", "")] = dec.get(r.get("decision", ""), 0) + 1
+    # SLO-goodput: served AND time-to-READY <= this ksvc's cold SLO.
+    slo_served = None
+    if slo_fn is not None:
+        slo_served = sum(1 for r in served
+                         if slo_fn(r["ksvc"]) and float(r["latency_ms"]) <= slo_fn(r["ksvc"]))
     return {
         "events": total,
         "served": len(served),
@@ -58,7 +63,23 @@ def replay_metrics(rows):
         "lat_p50": pct(lat, 50), "lat_p95": pct(lat, 95),
         "lat_p99": pct(lat, 99),
         "lat_mean": (sum(lat) / len(lat)) if lat else None,
+        "slo_served": slo_served,
+        "goodput_pct": (100.0 * slo_served / total) if (slo_served is not None and total) else None,
     }
+
+
+def make_slo_fn(default_slo, mapping):
+    """Return f(ksvc) -> cold SLO ms. Longest matching prefix in `mapping`, else default."""
+    if default_slo is None and not mapping:
+        return None
+
+    def f(ksvc):
+        best = None
+        for pref, ms in mapping.items():
+            if ksvc.startswith(pref) and (best is None or len(pref) > len(best[0])):
+                best = (pref, ms)
+        return best[1] if best else default_slo
+    return f
 
 
 def nodes_metrics(rows):
@@ -110,7 +131,18 @@ def main():
     p.add_argument("results", nargs="*", help="res_<config>.csv files (default: glob res_*.csv)")
     p.add_argument("--prefix", default="analysis", help="output file prefix")
     p.add_argument("--plot", action="store_true", help="also write PNGs (needs matplotlib)")
+    p.add_argument("--cold-slo", type=float, default=None,
+                   help="default cold SLO ms → enables goodput (served AND ≤ SLO)")
+    p.add_argument("--slo", action="append", default=[],
+                   help="per-app SLO, repeatable: --slo measure-yolo=16000 --slo insignface=...")
     args = p.parse_args()
+
+    slo_map = {}
+    for s in args.slo:
+        if "=" in s:
+            k, v = s.split("=", 1)
+            slo_map[k.strip()] = float(v)
+    slo_fn = make_slo_fn(args.cold_slo, slo_map)
 
     files = args.results or [f for f in sorted(glob.glob("res_*.csv"))
                              if not f.endswith(".nodes.csv")]
@@ -134,12 +166,12 @@ def main():
 
     # Finalise replay metrics.
     for label, e in configs.items():
-        e["replay"] = replay_metrics(e["replay_rows"])
+        e["replay"] = replay_metrics(e["replay_rows"], slo_fn)
 
     # ---- printed table ---------------------------------------------------
-    hdr = ["config", "events", "served%", "p50ms", "p95ms", "peakCPUm",
+    hdr = ["config", "events", "served%", "goodput%", "p50ms", "p95ms", "peakCPUm",
            "meanCPUm", "meanAttrm", "CPU-s", "CPU-s(attr)", "util"]
-    widths = [16, 7, 8, 8, 8, 9, 9, 10, 9, 12, 6]
+    widths = [16, 7, 8, 9, 8, 8, 9, 9, 10, 9, 12, 6]
     line = "  ".join(h.ljust(w) for h, w in zip(hdr, widths))
     print(line)
     print("-" * len(line))
@@ -148,7 +180,7 @@ def main():
         e = configs[label]
         r, n = e["replay"], e["nodes"] or {}
         cells = [
-            label, str(r["events"]), fmt(r["served_pct"], 1),
+            label, str(r["events"]), fmt(r["served_pct"], 1), fmt(r["goodput_pct"], 1),
             fmt(r["lat_p50"]), fmt(r["lat_p95"]),
             fmt(n.get("peak_req")), fmt(n.get("mean_req")), fmt(n.get("mean_attr")),
             fmt(n.get("cpu_sec")), fmt(n.get("cpu_sec_attr")), fmt(n.get("util"), 2),
@@ -156,7 +188,8 @@ def main():
         print("  ".join(c.ljust(w) for c, w in zip(cells, widths)))
         summary_rows.append({
             "config": label, "events": r["events"], "served": r["served"],
-            "served_pct": r["served_pct"], "pending": r["pending"],
+            "served_pct": r["served_pct"], "slo_served": r["slo_served"],
+            "goodput_pct": r["goodput_pct"], "pending": r["pending"],
             "passthrough": r["passthrough"], "failed": r["failed"],
             "lat_p50": r["lat_p50"], "lat_p95": r["lat_p95"], "lat_p99": r["lat_p99"],
             "lat_mean": r["lat_mean"],
