@@ -98,6 +98,107 @@ ksvc can't be reused within `--cooldown`. If `gen_schedule.py` warns "events
 dropped", raise `--count` (fleet size ≥ wave-size + baseline churn) or lower
 `--cooldown`.
 
+## Real-app mix (recommended for the main experiments)
+
+The `loadtest-yolo` fleet (20 clones of one image) is useful when you need VOLUME
+of identical ksvcs (E3 burst on a single workload). For the **main resource story,
+use the real, already-profiled apps** — their per-app profiles differ wildly, so a
+one-size-fits-all static baseline can't win on all of them, which is exactly the
+point NIMBUS makes.
+
+Per-app profile (cold/warm knee, from `results/<app>/`):
+
+| App | Nimbus | ksvcs | endpoint | cold c_opt | warm c_opt | role |
+|-----|--------|-------|----------|-----------|-----------|------|
+| yolo | boost-001 | measure-yolo-001..003 | /status | 975m | 1125m | demonstrator (cold CPU-bound) |
+| face | boost-002 | insignface-001..003 | /status | 937m | 1875m | demonstrator |
+| jvm | boost-006 | jvm-probe-001..003 | /status | 437m | 812m | demonstrator |
+| llm | boost-005 | measure-llm-001..003 | /status¹ | 1062m | 1812m | demonstrator (minute-scale) |
+| io | boost-004 | io-probe-001..005 | /status | 100m | 100m | **control** (CPU-insensitive) |
+| sha256² | boost-003 | sha256-001..003 | /status | 75m | 825m | warm demonstrator |
+
+¹ Verify the LLM readiness path (`curl .../status` vs `.../loading-stats`) and use
+a long `--req-timeout` (cold-start is minute-scale). ² sha256 ksvcs may not be
+deployed — apply `config/go-sha256/*` first if you want it.
+
+**Why this mix proves resource efficiency:** cold c_opt spans 75m→1062m and warm
+100m→1875m. A static baseline must pick ONE number: `static-low 100m` times out
+yolo/face/llm/jvm; `static-high 2000m` runs everything but wastes ~20× on io/sha256.
+NIMBUS sizes each app individually → Pareto-wins on the whole mix. `io` is the
+control: NIMBUS correctly gives it the floor (more CPU wouldn't help), so it should
+NOT show a NIMBUS-vs-baseline latency gap — that absence is a feature.
+
+### Step 1 — enable online for the demonstrator Nimbuses (they ship `online:false`)
+
+`/decide` returns `passthrough` for a Nimbus with `online.enabled=false`, so the
+offline-measured apps must be flipped ON for the online experiment:
+
+```bash
+for nb in boost-001 boost-002 boost-005 boost-006 boost-004; do   # yolo face llm jvm io
+  kubectl patch nimbus "$nb" -n serverless --type=merge \
+    -p '{"spec":{"online":{"enabled":true}}}'
+done
+# verify one ksvc admits (not passthrough):
+curl -s -X POST http://localhost:8080/decide -H 'Content-Type: application/json' \
+  -d '{"namespace":"serverless","ksvc":"insignface-001"}'; echo
+```
+
+### Step 2 — build the mix ksvcs-file (the /status family: yolo+face+jvm+io)
+
+```bash
+printf '%s\n' \
+  measure-yolo-001 measure-yolo-002 measure-yolo-003 \
+  insignface-001 insignface-002 insignface-003 \
+  jvm-probe-001 jvm-probe-002 jvm-probe-003 \
+  io-probe-001 io-probe-002 io-probe-003 io-probe-004 io-probe-005 \
+  > mix.ksvcs
+```
+
+### Step 3 — run the mix (schedule + replay + sampler)
+
+```bash
+python3 gen_schedule.py --mode poisson --ksvcs-file mix.ksvcs \
+    --duration 600 --rate 0.2 --cooldown 120 --out sched_mix.csv    # cooldown ≥ slowest app
+
+python3 sample_resources.py --label nimbus-mix --duration 620 --out res_mix.nodes.csv &
+python3 replay.py --schedule sched_mix.csv --label nimbus-mix --out res_mix.csv
+```
+
+### Step 4 — LLM separately (long timeout)
+
+```bash
+printf '%s\n' measure-llm-001 measure-llm-002 measure-llm-003 > llm.ksvcs
+python3 gen_schedule.py --mode poisson --ksvcs-file llm.ksvcs \
+    --duration 600 --rate 0.05 --cooldown 240 --out sched_llm.csv
+python3 replay.py --schedule sched_llm.csv --req-timeout 300 \
+    --label nimbus-llm --out res_llm.csv   # add --path /loading-stats if /status doesn't READY
+```
+
+### Step 5 — baselines (same schedules, for comparison)
+
+- **Offline-only ablation** (easy, reversible): each app stays at its measured
+  c_opt, no online adaptation. Flip online OFF and replay with `--no-decide`:
+  ```bash
+  for nb in boost-001 boost-002 boost-005 boost-006 boost-004; do
+    kubectl patch nimbus "$nb" -n serverless --type=merge -p '{"spec":{"online":{"enabled":false}}}'
+  done
+  python3 sample_resources.py --label offline-only --duration 620 --out res_off.nodes.csv &
+  python3 replay.py --schedule sched_mix.csv --no-decide --label offline-only --out res_off.csv
+  ```
+- **Static-uniform** (the "no profiling" baseline): online OFF + patch every ksvc to
+  one fixed CPU + drop its boost CR (scoped, NOT `--all`), replay `--no-decide`.
+  Reversible by re-applying the app's `config/*/my-boost-preload-*.yaml`. This is
+  the baseline that best exposes the one-size-fits-all waste — build it only when
+  you're ready to restore the apps afterwards.
+
+### Cleanup — restore the apps to offline-only
+
+```bash
+for nb in boost-001 boost-002 boost-005 boost-006 boost-004; do
+  kubectl patch nimbus "$nb" -n serverless --type=merge -p '{"spec":{"online":{"enabled":false}}}'
+done
+```
+
 ## How cold-start latency is measured
 
 This workload's `/status` returns **503 while the YOLO model loads**, then
