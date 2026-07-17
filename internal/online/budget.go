@@ -3,13 +3,35 @@ package online
 import (
 	"context"
 	"fmt"
+	"os"
 	"sort"
+	"strings"
+	"sync"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"nimbus/api/kubeconfig"
+	"nimbus/api/logging"
 )
+
+// logSnapshotEnabled gates the per-snapshot headroom log (NIMBUS's own view of
+// free_n per node, the basis for every waterfall decision). OFF by default —
+// buildPoolSnapshot runs on every /decide and every 2s reconcile tick, so
+// always-on would flood nimbus.log. Set NIMBUS_LOG_SNAPSHOT=1 during an
+// experiment to cross-check NIMBUS's math against the external sample_resources.py.
+var (
+	logSnapOnce sync.Once
+	logSnapOn   bool
+)
+
+func logSnapshotEnabled() bool {
+	logSnapOnce.Do(func() {
+		v := os.Getenv("NIMBUS_LOG_SNAPSHOT")
+		logSnapOn = v == "1" || strings.EqualFold(v, "true")
+	})
+	return logSnapOn
+}
 
 // nodeFree is one candidate pool node's live headroom. All CPU values are
 // millicores. free is the smaller of two views (see buildPoolSnapshot) and is
@@ -81,6 +103,17 @@ func buildPoolSnapshot(ctx context.Context, selector map[string]string, ns strin
 		n.free = maxZero(minInt64(n.budget-n.serverlessUsed, n.allocCPU-n.allUsed))
 		snap.byName[n.name] = n
 	}
+
+	if logSnapshotEnabled() {
+		parts := make([]string, 0, len(snap.nodes))
+		for _, n := range snap.nodes {
+			parts = append(parts, fmt.Sprintf("%s{free=%dm alloc=%dm budget=%dm svcUsed=%dm allUsed=%dm}",
+				n.name, n.free, n.allocCPU, n.budget, n.serverlessUsed, n.allUsed))
+		}
+		logging.Info(fmt.Sprintf("[online][snapshot] event=pool_headroom ns=%s nodes=%d %s",
+			ns, len(snap.nodes), strings.Join(parts, " ")))
+	}
+
 	return snap, nil
 }
 

@@ -50,7 +50,7 @@ ken/
 **What works partially** (in-process, runnable; the Knative-side fork is the missing piece):
 
 - The **online** decision engine: synchronous `POST /decide` HTTP endpoint, 3-tier waterfall (`c_opt` pool-wide → `c_min` pool-wide → `best_fit` pinned), EWMA burst detector, 70 %-per-node headroom budget, polling self-healer that re-asserts the same waterfall every 2 s.
-- The steady-state warm CPU is locked to `c_opt_warm` on every tier — the thesis scope is cold-start optimization, so only the boost CR's cpu varies per tier.
+- The steady-state warm CPU the pod reverts to is **`c_min_warm`** by default (the smallest CPU still meeting the warm SLO), the same value across all tiers — the waterfall varies only the boost CR's cold cpu per tier. Set **`NIMBUS_WARM_TIER=opt`** to lock warm at `c_opt_warm` (the knee) instead, restoring the original cold-only-optimization behaviour. `c_min_warm` reserves less CPU per ksvc (more fit before Pending, directly easing `no_node_meets_c_opt_warm` under contention) at the cost of steady-state latency margin. Falls back to `c_opt_warm` when `c_min_warm` is empty (warm SLO unset, or no probed sample met it).
 - **What's still missing**: the Knative KPA fork at `scaler.go::applyScale` that synchronously calls `/decide` on `0→1` cold-start. Until it lands, the polling loop is the only consumer of the waterfall and the burst detector has no event source (mode stays NORMAL).
 
 **What's out of scope** (and won't be added):
