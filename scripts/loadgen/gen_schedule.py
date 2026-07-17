@@ -34,20 +34,46 @@ def make_ksvc_names(base, count):
 class Picker:
     """Least-recently-used cold-ksvc picker honouring a reuse cooldown."""
 
-    def __init__(self, ksvcs, cooldown):
+    def __init__(self, ksvcs, cooldown_fn):
         self.ksvcs = list(ksvcs)
-        self.cooldown = cooldown
+        self.cooldown_fn = cooldown_fn   # per-ksvc: minute-scale apps (llm) need longer
         self.last_used = {k: -1e9 for k in ksvcs}
         self.skipped = 0
 
     def pick(self, t):
-        cands = [k for k in self.ksvcs if self.last_used[k] <= t - self.cooldown]
+        cands = [k for k in self.ksvcs if self.last_used[k] <= t - self.cooldown_fn(k)]
         if not cands:
             self.skipped += 1
             return None
         k = min(cands, key=lambda k: self.last_used[k])
         self.last_used[k] = t
         return k
+
+
+def parse_endpoints(specs):
+    """--endpoint 'prefix=path[,ready_body[,timeout[,cooldown]]]' → {prefix: {...}}."""
+    eps = {}
+    for s in specs:
+        if "=" not in s:
+            continue
+        pref, rest = s.split("=", 1)
+        parts = (rest.split(",") + ["", "", "", ""])[:4]
+        eps[pref] = {
+            "path": parts[0] or None,
+            "ready_body": parts[1] or None,
+            "timeout": parts[2] or None,
+            "cooldown": float(parts[3]) if parts[3] else None,
+        }
+    return eps
+
+
+def match_endpoint(ksvc, eps):
+    """Longest-prefix endpoint config for ksvc, or {} if none matches."""
+    best = None
+    for pref in eps:
+        if ksvc.startswith(pref) and (best is None or len(pref) > len(best)):
+            best = pref
+    return eps.get(best, {}) if best else {}
 
 
 def gen_periodic(picker, duration, rate):
@@ -106,6 +132,11 @@ def main():
     p.add_argument("--wave-size", type=int, default=12)
     p.add_argument("--wave-window", type=float, default=6.0)
     p.add_argument("--wave-at", default="60", help="comma list of wave start times, e.g. 60,180")
+    # Per-app endpoint override — lets ONE schedule mix apps with different
+    # readiness endpoints (e.g. LLM /loading-stats) so replay drives them together.
+    p.add_argument("--endpoint", action="append", default=[],
+                   help="prefix=path[,ready_body[,timeout[,cooldown]]], repeatable, e.g. "
+                        "--endpoint measure-llm=/loading-stats,ready,300,240")
     args = p.parse_args()
 
     rng = random.Random(args.seed)
@@ -114,7 +145,13 @@ def main():
             ksvcs = [ln.strip() for ln in f if ln.strip()]
     else:
         ksvcs = make_ksvc_names(args.base_name, args.count)
-    picker = Picker(ksvcs, args.cooldown)
+
+    eps = parse_endpoints(args.endpoint)
+
+    def cooldown_fn(k):
+        return match_endpoint(k, eps).get("cooldown") or args.cooldown
+
+    picker = Picker(ksvcs, cooldown_fn)
 
     if args.mode == "periodic":
         events = gen_periodic(picker, args.duration, args.rate)
@@ -128,9 +165,11 @@ def main():
 
     with open(args.out, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["offset_sec", "ksvc"])
+        w.writerow(["offset_sec", "ksvc", "path", "ready_body", "timeout"])
         for t, k in events:
-            w.writerow([f"{t:.3f}", k])
+            ep = match_endpoint(k, eps)
+            w.writerow([f"{t:.3f}", k, ep.get("path") or "",
+                        ep.get("ready_body") or "", ep.get("timeout") or ""])
 
     span = events[-1][0] if events else 0.0
     print(f"[gen_schedule] mode={args.mode} events={len(events)} span={span:.1f}s "

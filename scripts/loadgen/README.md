@@ -147,7 +147,11 @@ curl -s -X POST http://localhost:8080/decide -H 'Content-Type: application/json'
   -d '{"namespace":"serverless","ksvc":"insignface-001"}'; echo
 ```
 
-### Step 2 — build the mix ksvcs-file (the /status family: yolo+face+jvm+io)
+### Step 2 — build ONE mix ksvcs-file (all apps, LLM included)
+
+LLM has a different readiness endpoint (`/loading-stats`, minute-scale), but you no
+longer need a separate run — `gen_schedule --endpoint` attaches a per-app path /
+ready-body / timeout / cooldown, so ONE schedule drives the whole mix.
 
 ```bash
 printf '%s\n' \
@@ -155,45 +159,67 @@ printf '%s\n' \
   insignface-001 insignface-002 insignface-003 \
   jvm-probe-001 jvm-probe-002 jvm-probe-003 \
   io-probe-001 io-probe-002 io-probe-003 io-probe-004 io-probe-005 \
+  measure-llm-001 measure-llm-002 measure-llm-003 \
   > mix.ksvcs
 ```
 
-### Step 3 — run the mix (schedule + replay + sampler)
+### Step 3 — idle-cluster right-sizing (NIMBUS vs fix-low vs fix-high)
+
+On an **idle** cluster (no filler), this proves NIMBUS meets the SLO at LESS CPU
+than a generous fixed policy, while a cheap fixed policy misses the SLO:
+
+- **fix-200m** (all apps 200m): cheap, but yolo/face/llm cold-start needs ~1000m →
+  times out → **fails latency SLO**.
+- **fix-2000m** (all apps 2000m): meets SLO, but reserves ~2–20× what each app needs
+  → **wastes resource**.
+- **NIMBUS**: gives each app its c_opt → **meets SLO AND spends far less than 2000m**.
+
+Run all three under BOTH periodic and poisson, with LLM merged in via `--endpoint`:
 
 ```bash
-python3 gen_schedule.py --mode poisson --ksvcs-file mix.ksvcs \
-    --duration 600 --rate 0.2 --cooldown 120 --out sched_mix.csv    # cooldown ≥ slowest app
+LLM='--endpoint measure-llm=/loading-stats,ready,300,240'   # path,ready,timeout,cooldown
 
-python3 sample_resources.py --label nimbus-mix --duration 620 --out res_mix.nodes.csv &
-python3 replay.py --schedule sched_mix.csv --label nimbus-mix --out res_mix.csv
+for MODE in periodic poisson; do
+  python3 gen_schedule.py --mode $MODE --ksvcs-file mix.ksvcs \
+      --duration 600 --rate 0.2 --cooldown 120 $LLM --seed 42 --out sched_$MODE.csv
+
+  # NIMBUS (online already true on the mix Nimbuses)
+  python3 sample_resources.py --label ${MODE}_nimbus --duration 620 --out res_${MODE}_nimbus.nodes.csv &
+  python3 replay.py --schedule sched_$MODE.csv --label ${MODE}_nimbus --out res_${MODE}_nimbus.csv
+done
 ```
 
-### Step 4 — LLM separately (long timeout)
+### Step 4 — the two fixed baselines (same schedules)
+
+`set_baseline.py --policy uniform` pins EVERY app to one CPU + turns online off; then
+replay with `--no-decide`. Restore adaptive afterwards with `--policy nimbus`.
 
 ```bash
-printf '%s\n' measure-llm-001 measure-llm-002 measure-llm-003 > llm.ksvcs
-python3 gen_schedule.py --mode poisson --ksvcs-file llm.ksvcs \
-    --duration 600 --rate 0.05 --cooldown 240 --out sched_llm.csv
-python3 replay.py --schedule sched_llm.csv --req-timeout 300 \
-    --label nimbus-llm --out res_llm.csv   # add --path /loading-stats if /status doesn't READY
-```
-
-### Step 5 — baselines (same schedules, for comparison)
-
-- **Offline-only ablation** (easy, reversible): each app stays at its measured
-  c_opt, no online adaptation. Flip online OFF and replay with `--no-decide`:
-  ```bash
-  for nb in boost-001 boost-002 boost-005 boost-006 boost-004; do
-    kubectl patch nimbus "$nb" -n serverless --type=merge -p '{"spec":{"online":{"enabled":false}}}'
+NBS=boost-001,boost-002,boost-005,boost-006,boost-004
+for CPU in 200m 2000m; do
+  python3 set_baseline.py --policy uniform --cpu $CPU --nimbuses $NBS
+  for MODE in periodic poisson; do
+    python3 sample_resources.py --label ${MODE}_fix$CPU --duration 620 --out res_${MODE}_fix$CPU.nodes.csv &
+    python3 replay.py --schedule sched_$MODE.csv --no-decide --label ${MODE}_fix$CPU --out res_${MODE}_fix$CPU.csv
   done
-  python3 sample_resources.py --label offline-only --duration 620 --out res_off.nodes.csv &
-  python3 replay.py --schedule sched_mix.csv --no-decide --label offline-only --out res_off.csv
-  ```
-- **Static-uniform** (the "no profiling" baseline): online OFF + patch every ksvc to
-  one fixed CPU + drop its boost CR (scoped, NOT `--all`), replay `--no-decide`.
-  Reversible by re-applying the app's `config/*/my-boost-preload-*.yaml`. This is
-  the baseline that best exposes the one-size-fits-all waste — build it only when
-  you're ready to restore the apps afterwards.
+done
+python3 set_baseline.py --policy nimbus --nimbuses $NBS   # restore adaptive
+```
+
+### Step 5 — analyse (per traffic mode)
+
+```bash
+SLO='--slo measure-yolo=16000 --slo insignface=16000 --slo jvm-probe=... --slo io-probe=... --slo measure-llm=...'
+python3 analyze.py res_periodic_nimbus.csv res_periodic_fix200m.csv res_periodic_fix2000m.csv \
+    --plot --prefix periodic $SLO
+python3 analyze.py res_poisson_nimbus.csv res_poisson_fix200m.csv res_poisson_fix2000m.csv \
+    --plot --prefix poisson $SLO
+```
+
+Expected: NIMBUS has **goodput% ≈ fix-2000m** (both meet SLO) but **CPU-seconds ≪
+fix-2000m**; **fix-200m** has low goodput% (SLO misses/timeouts) despite low CPU. So
+NIMBUS is the only config satisfying both resource AND latency-SLO — under periodic
+AND poisson.
 
 ### Cleanup — restore the apps to offline-only
 
@@ -429,6 +455,7 @@ so it reflects only the experiment's reserved CPU.
 | `--duration` / `--rate` | 300 / 0.2 | periodic/poisson: length, events/sec |
 | `--baseline-rate` | 0.15 | burst: quiet-period rate |
 | `--wave-size` / `--wave-window` / `--wave-at` | 12 / 6 / 60 | burst: wave shape + start times |
+| `--endpoint` | — | per-app `prefix=path[,ready_body[,timeout[,cooldown]]]`, repeatable — mix apps with different endpoints (e.g. LLM) in one schedule |
 | `--seed` | 42 | fixed → identical schedule across configs |
 | `--out` | schedule.csv | output |
 

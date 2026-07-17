@@ -76,7 +76,14 @@ def poll_until_ready(url, ready_body, poll_interval, timeout):
     return None, last_code, attempts
 
 
-def worker(ev_offset, ksvc, args, rows, lock):
+def worker(ev, args, rows, lock):
+    ev_offset, ksvc = ev["offset"], ev["ksvc"]
+    # Per-row endpoint overrides (from the schedule) fall back to the CLI flags,
+    # so one mixed schedule can drive apps with different endpoints (e.g. LLM).
+    path = ev.get("path") or args.path
+    ready_body = ev.get("ready_body") or args.ready_body
+    timeout = float(ev["timeout"]) if ev.get("timeout") else args.req_timeout
+
     row = {"label": args.label, "event_offset": f"{ev_offset:.3f}", "ksvc": ksvc,
            "decided": 0, "decision": "", "tier": "", "boost_cpu": "", "warm_cpu": "", "mode": "",
            "send_wallclock": "", "latency_ms": "", "http_code": "", "attempts": ""}
@@ -95,9 +102,9 @@ def worker(ev_offset, ksvc, args, rows, lock):
 
     time.sleep(args.settle)
 
-    url = f"http://{ksvc}.{args.namespace}.{args.dns_suffix}{args.path}"
+    url = f"http://{ksvc}.{args.namespace}.{args.dns_suffix}{path}"
     row["send_wallclock"] = f"{time.time():.3f}"
-    lat, code, attempts = poll_until_ready(url, args.ready_body, args.poll_interval, args.req_timeout)
+    lat, code, attempts = poll_until_ready(url, ready_body, args.poll_interval, timeout)
     row["latency_ms"] = "" if lat is None else f"{lat:.1f}"
     row["http_code"] = str(code)
     row["attempts"] = str(attempts)
@@ -132,19 +139,22 @@ def main():
     args = p.parse_args()
 
     with open(args.schedule) as f:
-        events = [(float(r["offset_sec"]), r["ksvc"]) for r in csv.DictReader(f)]
-    events.sort(key=lambda e: e[0])
+        events = [{"offset": float(r["offset_sec"]), "ksvc": r["ksvc"],
+                   "path": r.get("path"), "ready_body": r.get("ready_body"),
+                   "timeout": r.get("timeout")}
+                  for r in csv.DictReader(f)]
+    events.sort(key=lambda e: e["offset"])
     print(f"[replay] label={args.label} events={len(events)} decide={'OFF' if args.no_decide else 'ON'} "
           f"settle={args.settle}s path={args.path}")
 
     rows, lock, threads = [], threading.Lock(), []
     start = time.monotonic()
-    for offset, ksvc in events:
-        due = start + offset
+    for ev in events:
+        due = start + ev["offset"]
         now = time.monotonic()
         if due > now:
             time.sleep(due - now)
-        t = threading.Thread(target=worker, args=(offset, ksvc, args, rows, lock))
+        t = threading.Thread(target=worker, args=(ev, args, rows, lock))
         t.start()
         threads.append(t)
     for t in threads:
