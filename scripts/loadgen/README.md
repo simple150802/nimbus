@@ -191,19 +191,34 @@ done
 
 ### Step 4 — the two fixed baselines (same schedules)
 
+**STOP NIMBUS first (Ctrl-C the `go run ./cmd`).** Even with `online.enabled=false`,
+NIMBUS's reconciler re-asserts c_opt every 2 s (`enforceOfflineBootstrap`, drift
+correction) — a running NIMBUS would overwrite the fixed CPU back to c_opt. Same
+rule as verify-probe.sh / benchmark.sh.
+
 `set_baseline.py --policy uniform` pins EVERY app to one CPU + turns online off; then
-replay with `--no-decide`. Restore adaptive afterwards with `--policy nimbus`.
+replay with `--no-decide`. `NBS` = the Nimbuses of the apps IN your mix (yolo/face/jvm
+= boost-001/002/006; add boost-004/005 only if io/llm are in the mix).
 
 ```bash
-NBS=boost-001,boost-002,boost-005,boost-006,boost-004
+# 1. Ctrl-C NIMBUS.  2. then:
+NBS=boost-001,boost-002,boost-006
 for CPU in 200m 2000m; do
   python3 set_baseline.py --policy uniform --cpu $CPU --nimbuses $NBS
+  sleep 10   # let the new ksvc revision + boost CR roll out before replaying
   for MODE in periodic poisson; do
     python3 sample_resources.py --label ${MODE}_fix$CPU --duration 620 --out res_${MODE}_fix$CPU.nodes.csv &
     python3 replay.py --schedule sched_$MODE.csv --no-decide --label ${MODE}_fix$CPU --out res_${MODE}_fix$CPU.csv
   done
 done
-python3 set_baseline.py --policy nimbus --nimbuses $NBS   # restore adaptive
+```
+
+Restore afterwards (turn online back on, then restart NIMBUS so it re-applies
+c_opt / warm=c_min):
+
+```bash
+python3 set_baseline.py --policy nimbus --nimbuses $NBS
+cd /home/ubuntu/nimbus && go run ./cmd 2>&1 | tee nimbus.log
 ```
 
 ### Step 5 — analyse (per traffic mode)
